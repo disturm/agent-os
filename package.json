@@ -7,7 +7,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "agent": "tsx index.ts"
+    "agent": "tsx index.ts",
+    "replay": "tsx scripts/replay.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "dependencies": {
     "@openai/agents": "^0.16.0",

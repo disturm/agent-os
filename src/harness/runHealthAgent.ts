@@ -4,7 +4,8 @@
  * Здесь только последовательность шагов и решения по вердикту. Всё остальное — в соседях:
  * промпты в `promptVersions.ts`, валидация ответа ревьюера в `validateReview.ts`,
  * состояние раундов в `rounds.ts`, итоговые метрики в `score.ts`, имена вызванных
- * инструментов в `toolCalls.ts`. Сами инструменты — в `src/skills/`.
+ * инструментов в `toolCalls.ts`, слепок прогона на диск — в `traceRun.ts`.
+ * Сами инструменты — в `src/skills/`.
  */
 
 import OpenAI from 'openai';
@@ -15,6 +16,7 @@ import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptV
 import { createRoundHistory, type RoundState } from './rounds';
 import { finalRound, finalScore, improved } from './score';
 import { toolCallNames } from './toolCalls';
+import { saveTrace } from './traceRun';
 import { validateReview, type Review } from './validateReview';
 
 // --- Провайдер: DeepSeek через OpenAI-совместимый API ---
@@ -112,6 +114,9 @@ export async function runHealthAgent(
    *
    * Здесь же единственное обращение к `data/output.md` за прогон: сохраняется ровно тот план,
    * который уехал пользователю, и только если итоговый вердикт — `approve`.
+   *
+   * И здесь же пишется трейс — по той же причине, по которой выход один: прогон, ушедший
+   * мимо `runs/`, потом не с чем сравнить. Запись трейса прогон не роняет (см. `saveTrace`).
    */
   const finish = async (): Promise<AgentResult> => {
     const rounds = history.all();
@@ -132,6 +137,7 @@ export async function runHealthAgent(
     console.log(
       `Итог: раунд ${outcome.round} из ${rounds.length}, verdict=${outcome.review.verdict}, score=${result.finalScore}/10, инструментов вызвано ${toolCalls.length}, промпты coach ${promptVersions.coach} / reviewer ${promptVersions.reviewer}, ${result.durationMs} мс`,
     );
+    saveTrace(task, MODEL, result);
     return result;
   };
 
