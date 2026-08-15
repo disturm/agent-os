@@ -1,0 +1,183 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/*
+  Тема всегда задана явным атрибутом `data-theme` на <html>: «системную» разрешает
+  инлайн-скрипт в app/layout.tsx до первой отрисовки. Так набор токенов описан один раз,
+  без дубля под @media (prefers-color-scheme).
+*/
+@custom-variant dark ([data-theme='dark'] &);
+
+/*
+  Палитра: тёплый монохром. Цвет — дефицитный ресурс и несёт только смысл.
+  Три семантические пары approve/revise/stop соответствуют вердиктам safety review.
+*/
+:root,
+[data-theme='light'] {
+  --radius: 0.5rem;
+
+  --background: #f7f6f3;
+  --foreground: #2f3437;
+
+  --card: #ffffff;
+  --card-foreground: #2f3437;
+
+  --popover: #ffffff;
+  --popover-foreground: #2f3437;
+
+  --primary: #111111;
+  --primary-foreground: #ffffff;
+
+  --secondary: #efeeea;
+  --secondary-foreground: #2f3437;
+
+  --muted: #f1f0ed;
+  --muted-foreground: #787774;
+
+  --accent: #efeeea;
+  --accent-foreground: #111111;
+
+  --destructive: #9f2f2d;
+  --destructive-foreground: #ffffff;
+
+  --border: #eaeaea;
+  --input: #eaeaea;
+  --ring: #3b6b52;
+
+  /* Акцент. Контраст с белым 6.2:1, с фоном 5.7:1 — обе пары выше порога AA. */
+  --brand: #3b6b52;
+  --brand-hover: #325c46;
+  --brand-foreground: #ffffff;
+
+  --approve: #edf3ec;
+  --approve-foreground: #346538;
+  --revise: #fbf3db;
+  --revise-foreground: #956400;
+  --stop: #fdebec;
+  --stop-foreground: #9f2f2d;
+}
+
+[data-theme='dark'] {
+  --background: #17171a;
+  --foreground: #e8e7e3;
+
+  --card: #1e1e21;
+  --card-foreground: #e8e7e3;
+
+  --popover: #1e1e21;
+  --popover-foreground: #e8e7e3;
+
+  --primary: #e8e7e3;
+  --primary-foreground: #17171a;
+
+  --secondary: #26262a;
+  --secondary-foreground: #e8e7e3;
+
+  --muted: #232326;
+  --muted-foreground: #9b9a94;
+
+  --accent: #26262a;
+  --accent-foreground: #e8e7e3;
+
+  --destructive: #e08b88;
+  --destructive-foreground: #17171a;
+
+  --border: #2c2c30;
+  --input: #2c2c30;
+  --ring: #7cb894;
+
+  /* На тёмном фоне тот же тон работает только осветлённым: контраст с фоном 7.8:1. */
+  --brand: #7cb894;
+  --brand-hover: #8ec5a4;
+  --brand-foreground: #17171a;
+
+  --approve: #1c2a1e;
+  --approve-foreground: #9dc7a1;
+  --revise: #2c2618;
+  --revise-foreground: #d8b45f;
+  --stop: #2e1c1d;
+  --stop-foreground: #e08b88;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-foreground: var(--brand-foreground);
+
+  --color-approve: var(--approve);
+  --color-approve-foreground: var(--approve-foreground);
+  --color-revise: var(--revise);
+  --color-revise-foreground: var(--revise-foreground);
+  --color-stop: var(--stop);
+  --color-stop-foreground: var(--stop-foreground);
+
+  --font-sans: var(--font-golos), 'Helvetica Neue', sans-serif;
+  --font-serif: var(--font-playfair), Georgia, serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    line-height: 1.6;
+    font-feature-settings: 'ss01';
+  }
+
+  ::selection {
+    background: var(--secondary);
+  }
+}
+
+@layer utilities {
+  /* Появление блока результата: только transform и opacity. */
+  .enter {
+    animation: enter 600ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--index, 0) * 80ms);
+  }
+
+  @keyframes enter {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .enter {
+      animation: none;
+    }
+  }
+}

@@ -1,14 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
+import { useState, type CSSProperties } from 'react';
 
-type Review = {
-  verdict: 'approve' | 'revise' | 'needs_human_professional';
-  score: number;
-  issues: string[];
-};
-
-type AgentResult = { plan: string; review: Review; rounds: number };
+import { AgentForm } from '@/components/AgentForm';
+import { PlanView } from '@/components/PlanView';
+import { ReviewPanel } from '@/components/ReviewPanel';
+import { ThemeToggle } from '@/components/ThemeToggle';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
+import type { AgentResult } from '@/lib/agent-result';
 
 type State =
   | { status: 'idle' }
@@ -37,81 +38,104 @@ export default function Page() {
   }
 
   const running = state.status === 'running';
+  const result = state.status === 'result' ? state.result : null;
+  const blocked = result?.review.verdict === 'needs_human_professional';
 
   return (
-    <main style={{ maxWidth: 720, margin: '0 auto', padding: 24 }}>
-      <h1>Wellness-агент</h1>
-      <p style={{ color: '#666' }}>
-        Коуч по питанию, тренировкам и восстановлению с обязательной проверкой безопасности. Это не медицинский продукт.
-      </p>
+    <div className="mx-auto max-w-6xl px-6 py-12 lg:py-16">
+      <header className="flex items-start justify-between gap-6 border-b border-border pb-8">
+        <div>
+          <h1 className="font-serif text-4xl tracking-[-0.03em] text-primary lg:text-5xl">
+            Wellness-агент
+            <span aria-hidden className="ml-2 inline-block size-2 -translate-y-[0.15em] rounded-[2px] bg-brand" />
+          </h1>
+          <p className="mt-3 max-w-xl text-sm text-muted-foreground">
+            Коуч по питанию, тренировкам и восстановлению. Каждый план проходит обязательную проверку безопасности.
+            Это не медицинский продукт: диагнозы, лекарства и дозировки вне его компетенции.
+          </p>
+        </div>
+        <ThemeToggle />
+      </header>
 
-      <textarea
-        value={task}
-        onChange={(e) => setTask(e.target.value)}
-        disabled={running}
-        rows={4}
-        placeholder="Например: составь план питания на завтра"
-        style={{ width: '100%', padding: 8, fontFamily: 'inherit', fontSize: 16, boxSizing: 'border-box' }}
-      />
+      <main className="grid gap-10 pt-10 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] lg:gap-16">
+        <div className="space-y-8 lg:sticky lg:top-12 lg:self-start">
+          <AgentForm task={task} onTaskChange={setTask} onSubmit={runAgent} running={running} />
+          {result && <ReviewPanel review={result.review} rounds={result.rounds} />}
+        </div>
 
-      <button
-        onClick={runAgent}
-        disabled={running || !task.trim()}
-        style={{ marginTop: 12, padding: '8px 16px', fontSize: 16, cursor: running ? 'default' : 'pointer' }}
-      >
-        Run Agent
-      </button>
+        <section aria-live="polite" aria-busy={running}>
+          <h2 className="mb-5 text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase">
+            {blocked ? 'Ответ агента' : 'План'}
+          </h2>
 
-      {running && <p style={{ marginTop: 24 }}>Агент работает…</p>}
-
-      {state.status === 'error' && (
-        <p style={{ marginTop: 24, color: '#b00020' }}>Ошибка: {state.message}</p>
-      )}
-
-      {state.status === 'result' && <Result result={state.result} />}
-    </main>
+          {state.status === 'idle' && <EmptyState />}
+          {running && <RunningState />}
+          {state.status === 'error' && <ErrorState message={state.message} />}
+          {blocked && <BlockedState />}
+          {result && !blocked && <PlanView plan={result.plan} />}
+        </section>
+      </main>
+    </div>
   );
 }
 
-function Result({ result }: { result: AgentResult }) {
-  const { plan, review, rounds } = result;
-  const needsProfessional = review.verdict === 'needs_human_professional';
+/** До первого запуска правая колонка объясняет, как устроен прогон. */
+function EmptyState() {
+  const steps = [
+    ['Health Coach', 'Читает profile.md и log.md и пишет план под задачу.'],
+    ['Safety Reviewer', 'Проверяет план на границы wellness и ставит оценку до 10.'],
+    ['Revision loop', 'До трёх раундов правок; одобренный план ложится в output.md.'],
+  ];
 
   return (
-    <section style={{ marginTop: 24, borderTop: '1px solid #ddd', paddingTop: 24 }}>
-      {needsProfessional && (
-        <p
-          style={{
-            padding: 16,
-            border: '2px solid #b00020',
-            background: '#fff2f2',
-            color: '#b00020',
-            fontWeight: 600,
-            fontSize: 18,
-          }}
-        >
-          Этот запрос требует консультации специалиста
-        </p>
-      )}
+    <ol className="max-w-lg divide-y divide-border border-y border-border">
+      {steps.map(([title, description], index) => (
+        <li key={title} className="enter flex gap-4 py-4" style={{ '--index': index } as CSSProperties}>
+          <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
+          <div>
+            <p className="text-sm font-medium">{title}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
 
-      {!needsProfessional && (
-        <>
-          <h2>План</h2>
-          <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', background: '#f6f6f6', padding: 16 }}>{plan}</pre>
-        </>
-      )}
+function RunningState() {
+  return (
+    <div className="max-w-2xl space-y-3" aria-label="Агент работает">
+      <Skeleton className="h-6 w-1/3 rounded-sm bg-secondary" />
+      <Skeleton className="h-4 w-full rounded-sm bg-secondary" />
+      <Skeleton className="h-4 w-11/12 rounded-sm bg-secondary" />
+      <Skeleton className="h-4 w-4/5 rounded-sm bg-secondary" />
+      <Skeleton className="mt-8 h-6 w-1/4 rounded-sm bg-secondary" />
+      <Skeleton className="h-4 w-full rounded-sm bg-secondary" />
+      <Skeleton className="h-4 w-3/4 rounded-sm bg-secondary" />
+    </div>
+  );
+}
 
-      <h2>Safety review</h2>
-      <p>
-        Verdict: <strong>{review.verdict}</strong>
-        <br />
-        Score: <strong>{review.score}/10</strong>
-        <br />
-        Раундов: <strong>{rounds}</strong>
-      </p>
+function ErrorState({ message }: { message: string }) {
+  return (
+    <Alert variant="destructive" className="enter max-w-2xl rounded-lg shadow-none">
+      <ExclamationTriangleIcon />
+      <AlertTitle className="line-clamp-none">Прогон не завершился</AlertTitle>
+      <AlertDescription className="font-mono text-xs break-all">{message}</AlertDescription>
+    </Alert>
+  );
+}
 
-      <h3>Issues</h3>
-      {review.issues.length === 0 ? <p>Замечаний нет.</p> : <ul>{review.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul>}
-    </section>
+/** Предохранитель: при needs_human_professional план не показывается вообще. */
+function BlockedState() {
+  return (
+    <Alert className="enter max-w-2xl rounded-lg border-transparent bg-stop text-stop-foreground shadow-none">
+      <ExclamationTriangleIcon />
+      <AlertTitle className="line-clamp-none text-base">Этот запрос требует консультации специалиста</AlertTitle>
+      <AlertDescription className="text-stop-foreground/80">
+        Safety Reviewer остановил прогон: задача выходит за границы wellness-коучинга. Обратитесь к врачу или
+        профильному специалисту — план не составлялся.
+      </AlertDescription>
+    </Alert>
   );
 }

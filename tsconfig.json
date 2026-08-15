@@ -17,6 +17,11 @@
     "isolatedModules": true,
     "noEmit": true,
     "incremental": true,
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
     "plugins": [
       {
         "name": "next"
