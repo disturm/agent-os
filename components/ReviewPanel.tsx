@@ -1,18 +1,18 @@
-import { DotFilledIcon } from '@radix-ui/react-icons';
+import { DotFilledIcon, TriangleRightIcon } from '@radix-ui/react-icons';
 
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
-import { VERDICT_META, type Review } from '@/lib/agent-result';
+import { VERDICT_META, formatDuration, type AgentResult } from '@/lib/agent-result';
 
 type ReviewPanelProps = {
-  review: Review;
-  rounds: number;
+  result: AgentResult;
 };
 
-/** Итог safety review: вердикт, оценка, число раундов, замечания. */
-export function ReviewPanel({ review, rounds }: ReviewPanelProps) {
+/** Итог safety review: вердикт, оценка, история раундов, замечания и параметры прогона. */
+export function ReviewPanel({ result }: ReviewPanelProps) {
+  const { review, rounds, finalRound, finalScore, improved, promptVersions, durationMs } = result;
   const meta = VERDICT_META[review.verdict];
 
   return (
@@ -31,23 +31,46 @@ export function ReviewPanel({ review, rounds }: ReviewPanelProps) {
         <div className="flex items-baseline justify-between">
           <span className="text-sm text-muted-foreground">Оценка</span>
           <span className="font-mono text-sm text-foreground">
-            {review.score}
+            {finalScore}
             <span className="text-muted-foreground">/10</span>
           </span>
         </div>
         {/* Заливку индикатора shadcn жёстко ставит в bg-primary — перекрываем снаружи, не трогая примитив. */}
         <Progress
-          value={review.score * 10}
+          value={finalScore * 10}
           className="mt-3 h-1 rounded-none bg-secondary [&>[data-slot=progress-indicator]]:bg-brand"
         />
 
         <div className="mt-5 flex items-baseline justify-between">
           <span className="text-sm text-muted-foreground">Раундов доработки</span>
-          <span className="font-mono text-sm text-foreground">
-            {rounds}
-            <span className="text-muted-foreground">/3</span>
-          </span>
+          <span className="font-mono text-sm text-foreground">{rounds.length}</span>
         </div>
+        {improved && <p className="mt-1 text-xs text-muted-foreground">Оценка выросла за время доработок.</p>}
+
+        {/* История свёрнута: в норме интересен только итог, разбор раундов — по запросу. */}
+        <details className="group mt-4">
+          <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <TriangleRightIcon className="size-4 transition-transform group-open:rotate-90" />
+            История раундов
+          </summary>
+          <ol className="mt-3 space-y-2 border-l border-border pl-3">
+            {rounds.map((state) => (
+              <li key={state.round} className="flex items-baseline justify-between gap-3 text-xs">
+                <span className="text-muted-foreground">
+                  Раунд {state.round}
+                  {/* Итоговым может быть не последний раунд: доработка сверх минимума одобренный план не отменяет. */}
+                  {state.round === finalRound && rounds.length > 1 && (
+                    <span className="ml-1.5 text-brand">← итог</span>
+                  )}
+                </span>
+                <span className="font-mono text-foreground">
+                  {state.review.verdict}
+                  <span className="text-muted-foreground"> · {state.review.score}/10</span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </details>
       </CardContent>
 
       <Separator />
@@ -70,6 +93,22 @@ export function ReviewPanel({ review, rounds }: ReviewPanelProps) {
             ))}
           </ul>
         )}
+      </CardContent>
+
+      <Separator />
+
+      {/* Параметры прогона: по ним ответ соотносится с версией промптов и стоимостью цикла. */}
+      <CardContent className="px-5 py-4">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+          <dt className="text-muted-foreground">Время прогона</dt>
+          <dd className="text-right font-mono text-foreground">{formatDuration(durationMs)}</dd>
+          <dt className="text-muted-foreground">Промпты</dt>
+          <dd className="text-right font-mono text-foreground">
+            coach {promptVersions.coach}
+            <span className="text-muted-foreground"> · </span>
+            reviewer {promptVersions.reviewer}
+          </dd>
+        </dl>
       </CardContent>
     </Card>
   );

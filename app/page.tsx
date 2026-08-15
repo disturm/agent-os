@@ -60,7 +60,7 @@ export default function Page() {
       <main className="grid gap-10 pt-10 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] lg:gap-16">
         <div className="space-y-8 lg:sticky lg:top-12 lg:self-start">
           <AgentForm task={task} onTaskChange={setTask} onSubmit={runAgent} running={running} />
-          {result && <ReviewPanel review={result.review} rounds={result.rounds} />}
+          {result && <ReviewPanel result={result} />}
         </div>
 
         <section aria-live="polite" aria-busy={running}>

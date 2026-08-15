@@ -12,11 +12,35 @@ export type Review = {
   issues: string[];
 };
 
+/** Один проход коуч → ревьюер; зеркалит `RoundState` из `src/harness/rounds.ts`. */
+export type RoundState = {
+  round: number;
+  plan: string;
+  review: Review;
+};
+
+/** Версии промптов, на которых сделан прогон. */
+export type PromptVersions = {
+  coach: string;
+  reviewer: string;
+};
+
 export type AgentResult = {
   plan: string;
   review: Review;
-  rounds: number;
+  rounds: RoundState[];
+  /** Номер раунда, ставшего итогом: он может быть не последним в истории. */
+  finalRound: number;
+  finalScore: number;
+  improved: boolean;
+  promptVersions: PromptVersions;
+  durationMs: number;
 };
+
+/** Длительность прогона в секундах: миллисекунды тут ничего не решают. */
+export function formatDuration(durationMs: number): string {
+  return `${(durationMs / 1000).toFixed(1)} с`;
+}
 
 type VerdictMeta = {
   /** Русская расшифровка: сырой токен вердикта сам по себе ничего не объясняет. */
