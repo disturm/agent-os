@@ -19,7 +19,7 @@ const PROMPT_FILES = {
 export type PromptRole = keyof typeof PROMPT_FILES;
 
 /** Версии, с которыми идёт прогон. Единственное место, где они выбираются. */
-export const ACTIVE_PROMPTS: PromptVersions = { coach: 'v1', reviewer: 'v1' };
+export const ACTIVE_PROMPTS: PromptVersions = { coach: 'v2', reviewer: 'v1' };
 
 /** Слепок версий: уезжает в результат прогона, чтобы ответ можно было соотнести с промптом. */
 export type PromptVersions = Record<PromptRole, string>;

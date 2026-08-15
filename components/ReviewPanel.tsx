@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
-import { VERDICT_META, formatDuration, type AgentResult } from '@/lib/agent-result';
+import { TOOL_META, VERDICT_META, formatDuration, type AgentResult } from '@/lib/agent-result';
 
 type ReviewPanelProps = {
   result: AgentResult;
@@ -12,7 +12,7 @@ type ReviewPanelProps = {
 
 /** Итог safety review: вердикт, оценка, история раундов, замечания и параметры прогона. */
 export function ReviewPanel({ result }: ReviewPanelProps) {
-  const { review, rounds, finalRound, finalScore, improved, promptVersions, durationMs } = result;
+  const { review, rounds, finalRound, finalScore, improved, toolCalls, promptVersions, durationMs } = result;
   const meta = VERDICT_META[review.verdict];
 
   return (
@@ -71,6 +71,31 @@ export function ReviewPanel({ result }: ReviewPanelProps) {
             ))}
           </ol>
         </details>
+      </CardContent>
+
+      <Separator />
+
+      {/* Данные агент собирает сам, инструментами — без этого списка прогон выглядел бы чёрным ящиком. */}
+      <CardContent className="px-5 py-5">
+        <h3 className="text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase">
+          Что сделал агент
+          <span className="ml-2 font-mono tracking-normal normal-case">{toolCalls.length}</span>
+        </h3>
+
+        {toolCalls.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">Инструменты не понадобились.</p>
+        ) : (
+          <ol className="mt-3 space-y-2">
+            {toolCalls.map((name, index) => (
+              <li key={`${index}-${name}`} className="flex items-baseline gap-3 text-sm">
+                <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
+                <span className="font-mono text-[13px] text-foreground">{name}</span>
+                {/* Незнакомое имя показываем как есть: набор инструментов меняется чаще, чем UI. */}
+                <span className="text-xs text-muted-foreground">{TOOL_META[name] ?? ''}</span>
+              </li>
+            ))}
+          </ol>
+        )}
       </CardContent>
 
       <Separator />

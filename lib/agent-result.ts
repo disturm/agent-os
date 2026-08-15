@@ -33,8 +33,20 @@ export type AgentResult = {
   finalRound: number;
   finalScore: number;
   improved: boolean;
+  /** Инструменты, вызванные коучем за прогон, по порядку. Повторы не схлопнуты. */
+  toolCalls: string[];
   promptVersions: PromptVersions;
   durationMs: number;
+};
+
+/** Что делает инструмент — человеческой строкой: имя из API само по себе объясняет мало. */
+export const TOOL_META: Record<string, string> = {
+  getProfile: 'прочитал профиль',
+  getRecentLog: 'заглянул в дневник',
+  listFavoriteRecipes: 'посмотрел рецепты',
+  suggestWorkoutTemplate: 'взял шаблон тренировки',
+  generateShoppingList: 'собрал список покупок',
+  savePlan: 'сохранил план',
 };
 
 /** Длительность прогона в секундах: миллисекунды тут ничего не решают. */

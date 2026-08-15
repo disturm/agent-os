@@ -4,5 +4,6 @@ node_modules/
 next-env.d.ts
 *.tsbuildinfo
 
-# перезаписывается при каждом запуске
+# перезаписываются при каждом запуске
 data/output.md
+data/shopping.md
