@@ -1,17 +1,20 @@
 /**
- * Оркестратор прогона: собирает провайдер, промпты, агентов, историю раундов и метрики.
+ * Оркестратор прогона: поднимает MCP-сервер, собирает провайдер, промпты, агентов,
+ * историю раундов и метрики.
  *
  * Здесь только последовательность шагов и решения по вердикту. Всё остальное — в соседях:
  * промпты в `promptVersions.ts`, валидация ответа ревьюера в `validateReview.ts`,
  * состояние раундов в `rounds.ts`, итоговые метрики в `score.ts`, имена вызванных
  * инструментов в `toolCalls.ts`, слепок прогона на диск — в `traceRun.ts`.
- * Сами инструменты — в `src/skills/`.
+ * Данные агент берёт со своего MCP-сервера (`src/mcp/`), производные артефакты
+ * считают локальные навыки из `src/skills/`.
  */
 
 import OpenAI from 'openai';
-import { run, setDefaultOpenAIClient, setOpenAIAPI, setTracingDisabled } from '@openai/agents';
+import { run, setDefaultOpenAIClient, setOpenAIAPI, setTracingDisabled, type MCPServerStdio } from '@openai/agents';
 import { createCoach, createPlanSaver } from '../agents/healthCoach';
 import { createReviewer } from '../agents/safetyReviewer';
+import { selectMcpTools, startMarkdownHealthServer } from '../mcp/markdownHealthClient';
 import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptVersions';
 import { createRoundHistory, type RoundState } from './rounds';
 import { finalRound, finalScore, improved } from './score';
@@ -27,6 +30,15 @@ setOpenAIAPI('chat_completions'); // DeepSeek говорит на /chat/completi
 setTracingDisabled(true);
 export const MODEL = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro';
 
+/**
+ * Инструменты MCP-сервера, доступные коучу на черновых кругах: только чтение.
+ * `save_health_plan` сюда не входит, `append_daily_log` — тем более: дневник ведёт человек.
+ */
+const DRAFT_MCP_TOOLS = ['read_profile', 'read_recent_logs', 'list_recipes'];
+
+/** Право на необратимую запись. Выдаётся отдельным набором и только после `approve`. */
+const SAVE_MCP_TOOLS = ['save_health_plan'];
+
 export type AgentResult = {
   plan: string;
   review: Review;
@@ -38,7 +50,7 @@ export type AgentResult = {
   finalScore: number;
   /** Выросла ли оценка от первого раунда к последнему. */
   improved: boolean;
-  /** Имена инструментов, вызванных коучем за прогон, по порядку. Ревьюер сюда попасть не может. */
+  /** Имена инструментов, вызванных коучем за прогон, по порядку. MCP и локальные — одним списком. */
   toolCalls: string[];
   /** Версии промптов, на которых сделан этот прогон. */
   promptVersions: PromptVersions;
@@ -53,9 +65,16 @@ export type RunOptions = {
 };
 
 /** Минимум 2: коуч обязан хотя бы раз получить обратную связь ревьюера. */
-export const DEFAULT_MIN_ROUNDS = 2;
+export const DEFAULT_MIN_ROUNDS = 1;
 export const DEFAULT_MAX_ROUNDS = 3;
 
+/**
+ * Прогон целиком: проверка параметров, жизненный цикл MCP-сервера, цикл ревью.
+ *
+ * Сервер — отдельный процесс, поэтому его запуск и остановка стоят здесь, а не внутри цикла:
+ * поднимается один раз на прогон, до первого платного вызова, и гасится в `finally` —
+ * и на успехе, и на исключении, иначе процесс переживёт запрос и повиснет.
+ */
 export async function runHealthAgent(
   task: string,
   { minRounds = DEFAULT_MIN_ROUNDS, maxRounds = DEFAULT_MAX_ROUNDS }: RunOptions = {},
@@ -65,13 +84,32 @@ export async function runHealthAgent(
   if (maxRounds < minRounds) throw new Error(`maxRounds (${maxRounds}) не может быть меньше minRounds (${minRounds})`);
 
   const startedAt = performance.now();
+  const mcp = await startMarkdownHealthServer();
+  try {
+    return await reviewLoop({ task, minRounds, maxRounds, startedAt, mcp });
+  } finally {
+    await mcp.close();
+  }
+}
+
+type LoopContext = {
+  task: string;
+  minRounds: number;
+  maxRounds: number;
+  /** Отсчёт для `durationMs`: ведётся снаружи, чтобы в него попал и запуск MCP-сервера. */
+  startedAt: number;
+  mcp: MCPServerStdio;
+};
+
+async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopContext): Promise<AgentResult> {
   const history = createRoundHistory();
   const toolCalls: string[] = [];
   const promptVersions: PromptVersions = { ...ACTIVE_PROMPTS };
 
-  // Агенты собираются на прогон: промпт приходит из файла активной версии
+  // Агенты собираются на прогон: промпт приходит из файла активной версии,
+  // читающие инструменты — с MCP-сервера. Запись плана в этот набор не входит.
   const coachPrompt = loadActivePrompt('coach');
-  const coach = createCoach(coachPrompt);
+  const coach = createCoach(coachPrompt, await selectMcpTools(mcp, DRAFT_MCP_TOOLS));
   const reviewer = createReviewer(loadActivePrompt('reviewer'));
 
   /** Прогон коуча: заодно пополняет список вызванных инструментов, чтобы это не забывалось на местах. */
@@ -84,24 +122,28 @@ export async function runHealthAgent(
   };
 
   /**
-   * Фиксация одобренного плана: записывает его в `data/output.md` сам агент, вызовом `savePlan`.
+   * Фиксация одобренного плана: записывает его в `data/output.md` сам агент, вызовом
+   * `save_health_plan` на MCP-сервере.
    *
    * Разрешение даёт harness, а не промпт: инструмент подключается только здесь, после `approve`
    * (см. `createPlanSaver`). Строка в промпте «сохраняй только одобренный план» была бы просьбой —
    * модель вольна её не выполнить и зафиксировать черновик, который ревьюер зарубил.
    * Право на необратимую запись — свойство состояния прогона, поэтому им распоряжается код.
+   * То, что инструмент теперь живёт за протоколом, здесь ничего не меняет: сервер публикует
+   * его всегда, а в набор агента он попадает по-прежнему в одном месте и после проверки.
    *
    * Сбой шага прогон не роняет: план уже готов и одобрен, отдавать пользователю ошибку
    * из-за неудачной записи файла было бы хуже, чем вернуть план и предупредить в логе.
    */
   const saveApprovedPlan = async ({ round, plan, review }: RoundState) => {
-    const input = `Ревьюер одобрил план (раунд ${round}, score ${review.score}/10).\nСохрани его через savePlan: передай текст ниже без изменений.\n\n${plan}`;
+    const input = `Ревьюер одобрил план (раунд ${round}, score ${review.score}/10).\nСохрани его через save_health_plan: передай текст ниже без изменений.\n\n${plan}`;
     try {
-      const result = await run(createPlanSaver(coachPrompt), input);
+      const saver = createPlanSaver(coachPrompt, await selectMcpTools(mcp, SAVE_MCP_TOOLS));
+      const result = await run(saver, input);
       const tools = toolCallNames(result.newItems);
       toolCalls.push(...tools);
-      if (tools.includes('savePlan')) console.log(`\nПлан сохранён в data/output.md. Score: ${review.score}/10`);
-      else console.warn('\n! агент не вызвал savePlan — data/output.md не обновлён');
+      if (tools.includes('save_health_plan')) console.log(`\nПлан сохранён в data/output.md. Score: ${review.score}/10`);
+      else console.warn('\n! агент не вызвал save_health_plan — data/output.md не обновлён');
     } catch (err: unknown) {
       console.warn(`\n! сохранить план не вышло: ${err instanceof Error ? err.message : String(err)}`);
     }

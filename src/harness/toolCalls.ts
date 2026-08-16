@@ -9,7 +9,13 @@
 
 import type { RunItem } from '@openai/agents';
 
-/** Имена вызовов в порядке появления. Повторы не схлопываются: два `getProfile` — два факта. */
+/**
+ * Имена вызовов в порядке появления. Повторы не схлопываются: два `read_profile` — два факта.
+ *
+ * MCP-инструменты попадают сюда наравне с локальными и без пометок: SDK превращает их
+ * в обычные function tools, и в списке они выглядят так же — `read_profile` рядом с
+ * `generateShoppingList`. Разделение по происхождению — забота UI, а не этого модуля.
+ */
 export function toolCallNames(items: RunItem[]): string[] {
   return items
     .filter((item) => item.type === 'tool_call_item')
