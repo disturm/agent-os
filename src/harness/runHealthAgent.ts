@@ -1,24 +1,28 @@
 /**
- * Оркестратор прогона: поднимает MCP-сервер, собирает провайдер, промпты, агентов,
+ * Оркестратор прогона: поднимает MCP-серверы, собирает провайдер, промпты, агентов,
  * историю раундов и метрики.
  *
  * Здесь только последовательность шагов и решения по вердикту. Всё остальное — в соседях:
  * промпты в `promptVersions.ts`, валидация ответа ревьюера в `validateReview.ts`,
  * состояние раундов в `rounds.ts`, итоговые метрики в `score.ts`, имена вызванных
  * инструментов в `toolCalls.ts`, слепок прогона на диск — в `traceRun.ts`.
- * Данные агент берёт со своего MCP-сервера (`src/mcp/`), производные артефакты
+ * Данные агент берёт с MCP-серверов (`src/mcp/`), производные артефакты
  * считают локальные навыки из `src/skills/`.
+ *
+ * Какие серверы подняты и какие инструменты они дают — этот файл не знает: список приходит
+ * из `src/mcp/servers.config.ts`. Подключить ещё один сервер можно, не тронув harness
+ * (`docs/spec7.md`); harness распоряжается не составом наборов, а моментом их выдачи.
  */
 
 import OpenAI from 'openai';
-import { run, setDefaultOpenAIClient, setOpenAIAPI, setTracingDisabled, type MCPServerStdio } from '@openai/agents';
+import { run, setDefaultOpenAIClient, setOpenAIAPI, setTracingDisabled } from '@openai/agents';
 import { createCoach, createPlanSaver } from '../agents/healthCoach';
 import { createReviewer } from '../agents/safetyReviewer';
-import { selectMcpTools, startMarkdownHealthServer } from '../mcp/markdownHealthClient';
+import { startConfiguredServers, type McpConnections } from '../mcp/mcpClients';
 import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptVersions';
 import { createRoundHistory, type RoundState } from './rounds';
 import { finalRound, finalScore, improved } from './score';
-import { toolCallNames } from './toolCalls';
+import { calledTool, toolCallNames } from './toolCalls';
 import { saveTrace } from './traceRun';
 import { validateReview, type Review } from './validateReview';
 
@@ -29,15 +33,6 @@ setDefaultOpenAIClient(new OpenAI({ baseURL: process.env.DEEPSEEK_BASE_URL ?? 'h
 setOpenAIAPI('chat_completions'); // DeepSeek говорит на /chat/completions, не на Responses API
 setTracingDisabled(true);
 export const MODEL = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro';
-
-/**
- * Инструменты MCP-сервера, доступные коучу на черновых кругах: только чтение.
- * `save_health_plan` сюда не входит, `append_daily_log` — тем более: дневник ведёт человек.
- */
-const DRAFT_MCP_TOOLS = ['read_profile', 'read_recent_logs', 'list_recipes'];
-
-/** Право на необратимую запись. Выдаётся отдельным набором и только после `approve`. */
-const SAVE_MCP_TOOLS = ['save_health_plan'];
 
 export type AgentResult = {
   plan: string;
@@ -50,7 +45,10 @@ export type AgentResult = {
   finalScore: number;
   /** Выросла ли оценка от первого раунда к последнему. */
   improved: boolean;
-  /** Имена инструментов, вызванных коучем за прогон, по порядку. MCP и локальные — одним списком. */
+  /**
+   * Вызовы коуча за прогон, по порядку, с пометкой источника: `[weather] weather_forecast`.
+   * Все серверы и локальные навыки — одним списком.
+   */
   toolCalls: string[];
   /** Версии промптов, на которых сделан этот прогон. */
   promptVersions: PromptVersions;
@@ -64,16 +62,19 @@ export type RunOptions = {
   maxRounds?: number;
 };
 
-/** Минимум 2: коуч обязан хотя бы раз получить обратную связь ревьюера. */
+/**
+ * Минимум 1: одобрение с первого раза завершает прогон.
+ * Обязательный круг доработки включается явным `minRounds: 2` — он стоит ещё трёх платных вызовов.
+ */
 export const DEFAULT_MIN_ROUNDS = 1;
 export const DEFAULT_MAX_ROUNDS = 3;
 
 /**
- * Прогон целиком: проверка параметров, жизненный цикл MCP-сервера, цикл ревью.
+ * Прогон целиком: проверка параметров, жизненный цикл MCP-серверов, цикл ревью.
  *
- * Сервер — отдельный процесс, поэтому его запуск и остановка стоят здесь, а не внутри цикла:
- * поднимается один раз на прогон, до первого платного вызова, и гасится в `finally` —
- * и на успехе, и на исключении, иначе процесс переживёт запрос и повиснет.
+ * Каждый сервер — отдельный процесс, поэтому запуск и остановка стоят здесь, а не внутри
+ * цикла: поднимаются один раз на прогон, до первого платного вызова, и гасятся в `finally` —
+ * и на успехе, и на исключении, иначе процессы переживут запрос и повиснут.
  */
 export async function runHealthAgent(
   task: string,
@@ -84,7 +85,7 @@ export async function runHealthAgent(
   if (maxRounds < minRounds) throw new Error(`maxRounds (${maxRounds}) не может быть меньше minRounds (${minRounds})`);
 
   const startedAt = performance.now();
-  const mcp = await startMarkdownHealthServer();
+  const mcp = await startConfiguredServers();
   try {
     return await reviewLoop({ task, minRounds, maxRounds, startedAt, mcp });
   } finally {
@@ -96,9 +97,9 @@ type LoopContext = {
   task: string;
   minRounds: number;
   maxRounds: number;
-  /** Отсчёт для `durationMs`: ведётся снаружи, чтобы в него попал и запуск MCP-сервера. */
+  /** Отсчёт для `durationMs`: ведётся снаружи, чтобы в него попал и запуск MCP-серверов. */
   startedAt: number;
-  mcp: MCPServerStdio;
+  mcp: McpConnections;
 };
 
 async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopContext): Promise<AgentResult> {
@@ -107,42 +108,59 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
   const promptVersions: PromptVersions = { ...ACTIVE_PROMPTS };
 
   // Агенты собираются на прогон: промпт приходит из файла активной версии,
-  // читающие инструменты — с MCP-сервера. Запись плана в этот набор не входит.
+  // читающие инструменты — со всех поднятых MCP-серверов одним списком.
+  // Что необратимо (запись плана, файл, страница в Notion), в этот набор не входит.
   const coachPrompt = loadActivePrompt('coach');
-  const coach = createCoach(coachPrompt, await selectMcpTools(mcp, DRAFT_MCP_TOOLS));
+  const coach = createCoach(coachPrompt, mcp.draftTools);
   const reviewer = createReviewer(loadActivePrompt('reviewer'));
 
   /** Прогон коуча: заодно пополняет список вызванных инструментов, чтобы это не забывалось на местах. */
   const askCoach = async (input: string): Promise<string> => {
     const result = await run(coach, input);
-    const tools = toolCallNames(result.newItems);
+    const tools = toolCallNames(result.newItems, mcp.sources);
     toolCalls.push(...tools);
     if (tools.length) console.log(`  tools: ${tools.join(', ')}`);
     return result.finalOutput ?? '';
   };
 
   /**
-   * Фиксация одобренного плана: записывает его в `data/output.md` сам агент, вызовом
-   * `save_health_plan` на MCP-сервере.
+   * Фиксация одобренного плана. Записывает его сам агент — вызовом `save_health_plan`,
+   * а если пользователь просил сохранить план ещё куда-то, то и `write_file` (файл
+   * в `plans/`) или инструментами Notion.
    *
-   * Разрешение даёт harness, а не промпт: инструмент подключается только здесь, после `approve`
-   * (см. `createPlanSaver`). Строка в промпте «сохраняй только одобренный план» была бы просьбой —
-   * модель вольна её не выполнить и зафиксировать черновик, который ревьюер зарубил.
-   * Право на необратимую запись — свойство состояния прогона, поэтому им распоряжается код.
-   * То, что инструмент теперь живёт за протоколом, здесь ничего не меняет: сервер публикует
-   * его всегда, а в набор агента он попадает по-прежнему в одном месте и после проверки.
+   * Разрешение даёт harness, а не промпт: необратимые инструменты подключаются только здесь,
+   * после `approve` (см. `createPlanSaver`). Строка в промпте «сохраняй только одобренный план»
+   * была бы просьбой — модель вольна её не выполнить и зафиксировать черновик, который ревьюер
+   * зарубил. Право на необратимую запись — свойство состояния прогона, поэтому им распоряжается
+   * код. Появление чужих серверов этого не изменило, наоборот: `filesystem` и `notion` пишут
+   * наружу, и попадают они ровно в тот же набор, что и `save_health_plan`, — после проверки.
+   *
+   * Исходная задача уходит сюда вместе с планом: без неё агент не знает, просили ли его
+   * второе место хранения. Дата — потому что имя файла в задаче обычно её содержит
+   * (`plans/<дата>.md`), а сам по себе календарь модели неизвестен.
    *
    * Сбой шага прогон не роняет: план уже готов и одобрен, отдавать пользователю ошибку
    * из-за неудачной записи файла было бы хуже, чем вернуть план и предупредить в логе.
    */
   const saveApprovedPlan = async ({ round, plan, review }: RoundState) => {
-    const input = `Ревьюер одобрил план (раунд ${round}, score ${review.score}/10).\nСохрани его через save_health_plan: передай текст ниже без изменений.\n\n${plan}`;
+    const input = [
+      `Сегодняшняя дата: ${new Date().toISOString().slice(0, 10)}.`,
+      `Ревьюер одобрил план (раунд ${round}, score ${review.score}/10).`,
+      '',
+      `=== ИСХОДНАЯ ЗАДАЧА ===\n${task}`,
+      '',
+      'Сохрани план через save_health_plan: передай текст ниже без изменений.',
+      'Если в задаче просили сохранить его ещё куда-то — отдельным файлом или страницей в Notion, —',
+      'сделай и это, тем же текстом и теми инструментами, которые тебе доступны.',
+      '',
+      `=== ПЛАН ===\n${plan}`,
+    ].join('\n');
     try {
-      const saver = createPlanSaver(coachPrompt, await selectMcpTools(mcp, SAVE_MCP_TOOLS));
+      const saver = createPlanSaver(coachPrompt, mcp.approvedTools);
       const result = await run(saver, input);
-      const tools = toolCallNames(result.newItems);
+      const tools = toolCallNames(result.newItems, mcp.sources);
       toolCalls.push(...tools);
-      if (tools.includes('save_health_plan')) console.log(`\nПлан сохранён в data/output.md. Score: ${review.score}/10`);
+      if (calledTool(tools, 'save_health_plan')) console.log(`\nПлан сохранён в data/output.md. Score: ${review.score}/10`);
       else console.warn('\n! агент не вызвал save_health_plan — data/output.md не обновлён');
     } catch (err: unknown) {
       console.warn(`\n! сохранить план не вышло: ${err instanceof Error ? err.message : String(err)}`);
@@ -183,8 +201,8 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
     return result;
   };
 
-  // Контекст коуча — только задача: профиль, дневник и рецепты он берёт инструментами сам
-  console.log(`Задача: ${task}\nМодель: ${MODEL}\n`);
+  // Контекст коуча — только задача: профиль, дневник, рецепты и прогноз он берёт инструментами сам
+  console.log(`Задача: ${task}\nМодель: ${MODEL}\nMCP: ${mcp.started.join(', ')}\n`);
   let plan = await askCoach(`=== ЗАДАЧА ===\n${task}`);
 
   for (let round = 1; round <= maxRounds; round++) {
@@ -207,6 +225,7 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
 
     if (verdict === 'approve') {
       // Одобрение до minRounds цикл не завершает: коуч обязан получить обратную связь.
+      // На дефолтном minRounds = 1 условие выполняется сразу; ветка ниже — для явного minRounds >= 2.
       // Результат при этом не пострадает — finalRound откатится на этот раунд.
       if (round >= minRounds) return await finish();
       console.log(`  → обязательных раундов ${minRounds}, отправляю план коучу на доработку\n`);

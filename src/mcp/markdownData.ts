@@ -11,7 +11,7 @@
  * транспорт, а не смысл.
  *
  * Пути считаются от `process.cwd()`, то есть от корня проекта: серверный процесс запускается
- * с тем же рабочим каталогом, что и приложение (см. `markdownHealthClient.ts`).
+ * с тем же рабочим каталогом, что и приложение (см. `mcpClients.ts`).
  */
 
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';

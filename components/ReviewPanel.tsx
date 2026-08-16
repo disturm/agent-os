@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
-import { TOOL_META, VERDICT_META, formatDuration, type AgentResult } from '@/lib/agent-result';
+import { TOOL_META, VERDICT_META, formatDuration, splitToolCall, type AgentResult } from '@/lib/agent-result';
 
 type ReviewPanelProps = {
   result: AgentResult;
@@ -86,14 +86,23 @@ export function ReviewPanel({ result }: ReviewPanelProps) {
           <p className="mt-3 text-sm text-muted-foreground">Инструменты не понадобились.</p>
         ) : (
           <ol className="mt-3 space-y-2">
-            {toolCalls.map((name, index) => (
-              <li key={`${index}-${name}`} className="flex items-baseline gap-3 text-sm">
-                <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
-                <span className="font-mono text-[13px] text-foreground">{name}</span>
-                {/* Незнакомое имя показываем как есть: набор инструментов меняется чаще, чем UI. */}
-                <span className="text-xs text-muted-foreground">{TOOL_META[name] ?? ''}</span>
-              </li>
-            ))}
+            {toolCalls.map((entry, index) => {
+              const { source, name } = splitToolCall(entry);
+              return (
+                <li key={`${index}-${entry}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+                  <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
+                  {/* Источник: с какого MCP-сервера пришёл инструмент или `local`. Старые записи его не имеют. */}
+                  {source && (
+                    <span className="rounded-sm bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+                      {source}
+                    </span>
+                  )}
+                  <span className="font-mono text-[13px] text-foreground">{name}</span>
+                  {/* Незнакомое имя показываем как есть: набор инструментов меняется чаще, чем UI. */}
+                  <span className="text-xs text-muted-foreground">{TOOL_META[name] ?? ''}</span>
+                </li>
+              );
+            })}
           </ol>
         )}
       </CardContent>
