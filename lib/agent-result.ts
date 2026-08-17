@@ -25,6 +25,16 @@ export type PromptVersions = {
   reviewer: string;
 };
 
+/**
+ * Одно обращение к базе знаний. Зеркалит `RetrievalRecord` из `src/skills/knowledge.ts`.
+ * Текстов чанков здесь нет — только заголовки: UI показывает, чем агент пользовался,
+ * а не пересказывает базу.
+ */
+export type RetrievalRecord = {
+  query: string;
+  headings: string[];
+};
+
 export type AgentResult = {
   plan: string;
   review: Review;
@@ -38,9 +48,18 @@ export type AgentResult = {
    * Каждая запись — `[источник] имя`, разбирается через `splitToolCall`.
    */
   toolCalls: string[];
+  /**
+   * Обращения к базе знаний по порядку. Списком, а не полем внутри `toolCalls`, потому что
+   * там лежат только имена: i-я запись соответствует i-му вызову `searchKnowledge`.
+   * Старые ответы и трейсы (до `docs/spec8.md`) поля не имеют — отсюда `?`.
+   */
+  retrievals?: RetrievalRecord[];
   promptVersions: PromptVersions;
   durationMs: number;
 };
+
+/** Имя инструмента поиска по базе знаний: по нему UI находит записи `retrievals`. */
+export const SEARCH_KNOWLEDGE_TOOL = 'searchKnowledge';
 
 /**
  * Разбор записи `toolCalls`: `[weather] weather_forecast` → источник и имя.
@@ -79,6 +98,7 @@ export const TOOL_META: Record<string, string> = {
   API_post_page: 'создал страницу в Notion',
   suggestWorkoutTemplate: 'взял шаблон тренировки',
   generateShoppingList: 'собрал список покупок',
+  searchKnowledge: 'поискал в базе знаний',
 };
 
 /** Длительность прогона в секундах: миллисекунды тут ничего не решают. */

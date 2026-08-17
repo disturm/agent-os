@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "agent": "tsx index.ts",
+    "ingest": "tsx scripts/ingest.ts",
     "replay": "tsx scripts/replay.ts",
     "eval": "tsx scripts/eval.ts",
     "mcp:inspect": "tsx scripts/mcpInspect.ts"

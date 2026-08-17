@@ -1,0 +1,9 @@
+{
+  "name": "knowledge-based-recipe",
+  "task": "Предложи ужин с высоким белком без молочки на завтра: что готовить, из чего и сколько это займёт времени.",
+  "expect": {
+    "verdict": "approve",
+    "minScore": 7,
+    "usedTool": "searchKnowledge"
+  }
+}

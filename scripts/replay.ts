@@ -34,6 +34,16 @@ function promptsOf(versions: { coach: string; reviewer: string } | undefined): s
 }
 
 /**
+ * Обращения к базе знаний: `ужин с высоким белком → 5`. Сравниваются именно запросы —
+ * сменился промпт, и коуч спрашивает базу иначе, даже если вердикт остался прежним.
+ * В трейсах до `docs/spec8.md` поля нет, и строка честно покажет «—».
+ */
+function retrievalsOf(retrievals: { query: string; headings: string[] }[] | undefined): string {
+  if (!retrievals?.length) return '—';
+  return retrievals.map((r) => `${r.query} → ${r.headings.length}`).join('; ');
+}
+
+/**
  * Строка сравнения. Маркер стоит первым, а не последним: длина значений заранее неизвестна,
  * и колонка «изменилось» уехала бы вразнос.
  *
@@ -60,6 +70,7 @@ function printDiff(trace: RunTrace, fresh: AgentResult): void {
   row('score', `${dash(trace.finalScore?.toString())}/10`, `${fresh.finalScore}/10`);
   row('раунды', roundsOf(trace.rounds), roundsOf(fresh.rounds));
   row('toolCalls', dash(trace.toolCalls?.join(', ')), dash(fresh.toolCalls.join(', ')));
+  row('knowledge', retrievalsOf(trace.retrievals), retrievalsOf(fresh.retrievals));
   row('промпты', promptsOf(trace.promptVersions), promptsOf(fresh.promptVersions));
   row('модель', dash(trace.model), MODEL);
   // Время сравнивать бессмысленно: оно пляшет от нагрузки на провайдера, а не от наших правок

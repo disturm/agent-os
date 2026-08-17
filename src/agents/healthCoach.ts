@@ -1,4 +1,5 @@
 import { Agent, type Tool } from '@openai/agents';
+import { createKnowledgeSearch, type OnRetrieval } from '../skills/knowledge';
 import { generateShoppingList } from '../skills/shopping';
 import { suggestWorkoutTemplate } from '../skills/workouts';
 
@@ -7,12 +8,18 @@ const MODEL = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro';
 /**
  * Локальные инструменты черновых кругов: обычные `tool()` из `src/skills/`.
  *
- * Данные коуч берёт с MCP-сервера, а эти два считают производное от уже полученного —
- * шаблон тренировки и список покупок по тексту плана. Они остались локальными намеренно
- * (`docs/spec6.md`): рядом в одном наборе видно, что для агента MCP-инструмент и локальный
- * `tool()` неразличимы — одно имя, одна схема параметров, один след в `toolCalls`.
+ * Данные о пользователе коуч берёт с MCP-сервера, а эти три работают без него — считают
+ * производное от уже полученного (шаблон тренировки, список покупок по тексту плана) или
+ * ходят в базу знаний (`searchKnowledge`). Они остались локальными намеренно: в одном
+ * наборе с MCP видно, что для агента разницы нет — одно имя, одна схема параметров, один
+ * след в `toolCalls`.
+ *
+ * `searchKnowledge` собирается на прогон, а не лежит готовым: ему нужен приёмник записей
+ * о retrieval, и владеет им harness (см. `createCoach`).
  */
-const LOCAL_DRAFT_TOOLS = [suggestWorkoutTemplate, generateShoppingList];
+function localDraftTools(onRetrieval: OnRetrieval): Tool[] {
+  return [suggestWorkoutTemplate, generateShoppingList, createKnowledgeSearch(onRetrieval)];
+}
 
 /**
  * Health Coach: пишет wellness-план под задачу.
@@ -21,9 +28,17 @@ const LOCAL_DRAFT_TOOLS = [suggestWorkoutTemplate, generateShoppingList];
  * текстом, версию выбирает harness (`promptVersions.ts`). Инструменты чтения данных
  * приходят оттуда же: это MCP-инструменты со всех поднятых серверов одним списком,
  * а какие именно и с каких серверов — решает `src/mcp/servers.config.ts`, не агент.
+ *
+ * `onRetrieval` — колбэк для записей о поиске по базе знаний (`docs/spec8.md`). Куда они
+ * лягут, агент не знает: он только прокидывает его в инструмент.
  */
-export function createCoach(instructions: string, mcpTools: Tool[]) {
-  return new Agent({ name: 'Health Coach', model: MODEL, instructions, tools: [...mcpTools, ...LOCAL_DRAFT_TOOLS] });
+export function createCoach(instructions: string, mcpTools: Tool[], onRetrieval: OnRetrieval) {
+  return new Agent({
+    name: 'Health Coach',
+    model: MODEL,
+    instructions,
+    tools: [...mcpTools, ...localDraftTools(onRetrieval)],
+  });
 }
 
 /**

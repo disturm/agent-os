@@ -19,6 +19,8 @@ import { run, setDefaultOpenAIClient, setOpenAIAPI, setTracingDisabled } from '@
 import { createCoach, createPlanSaver } from '../agents/healthCoach';
 import { createReviewer } from '../agents/safetyReviewer';
 import { startConfiguredServers, type McpConnections } from '../mcp/mcpClients';
+import { assertRagConfigured } from '../rag/retriever';
+import type { RetrievalRecord } from '../skills/knowledge';
 import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptVersions';
 import { createRoundHistory, type RoundState } from './rounds';
 import { finalRound, finalScore, improved } from './score';
@@ -50,6 +52,12 @@ export type AgentResult = {
    * Все серверы и локальные навыки — одним списком.
    */
   toolCalls: string[];
+  /**
+   * Обращения к базе знаний, по порядку: запрос и заголовки найденных секций.
+   * i-я запись соответствует i-му вызову `searchKnowledge` в `toolCalls` — по ней видно
+   * не только что агент искал, но и что нашёл.
+   */
+  retrievals: RetrievalRecord[];
   /** Версии промптов, на которых сделан этот прогон. */
   promptVersions: PromptVersions;
   durationMs: number;
@@ -84,7 +92,12 @@ export async function runHealthAgent(
   if (minRounds < 1) throw new Error('minRounds не может быть меньше 1: без ревью план не отдаётся');
   if (maxRounds < minRounds) throw new Error(`maxRounds (${maxRounds}) не может быть меньше minRounds (${minRounds})`);
 
+  // RAG проверяется здесь же, до первого платного вызова: инструмент поиска, который
+  // сломается в середине прогона на отсутствующем ключе, оставит коуча без базы знаний,
+  // а тот пойдёт сочинять рецепты — ровно то, ради чего база и заводилась. Проверка
+  // локальная, ни в Supabase, ни к провайдеру эмбеддингов не ходит.
   const startedAt = performance.now();
+  assertRagConfigured();
   const mcp = await startConfiguredServers();
   try {
     return await reviewLoop({ task, minRounds, maxRounds, startedAt, mcp });
@@ -105,13 +118,22 @@ type LoopContext = {
 async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopContext): Promise<AgentResult> {
   const history = createRoundHistory();
   const toolCalls: string[] = [];
+  /**
+   * Записи о поиске по базе знаний. Копятся здесь, а не внутри инструмента: накопление —
+   * дело оркестратора, ровно как с `toolCalls`. Инструмент только зовёт колбэк.
+   */
+  const retrievals: RetrievalRecord[] = [];
   const promptVersions: PromptVersions = { ...ACTIVE_PROMPTS };
 
   // Агенты собираются на прогон: промпт приходит из файла активной версии,
   // читающие инструменты — со всех поднятых MCP-серверов одним списком.
   // Что необратимо (запись плана, файл, страница в Notion), в этот набор не входит.
   const coachPrompt = loadActivePrompt('coach');
-  const coach = createCoach(coachPrompt, mcp.draftTools);
+  const coach = createCoach(coachPrompt, mcp.draftTools, (record) => {
+    retrievals.push(record);
+    console.log(`  knowledge: «${record.query}» → ${record.headings.length} chunk(s)`);
+    for (const heading of record.headings) console.log(`    · ${heading}`);
+  });
   const reviewer = createReviewer(loadActivePrompt('reviewer'));
 
   /** Прогон коуча: заодно пополняет список вызванных инструментов, чтобы это не забывалось на местах. */
@@ -191,11 +213,12 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
       finalScore: finalScore(rounds),
       improved: improved(rounds),
       toolCalls,
+      retrievals,
       promptVersions,
       durationMs: Math.round(performance.now() - startedAt),
     };
     console.log(
-      `Итог: раунд ${outcome.round} из ${rounds.length}, verdict=${outcome.review.verdict}, score=${result.finalScore}/10, инструментов вызвано ${toolCalls.length}, промпты coach ${promptVersions.coach} / reviewer ${promptVersions.reviewer}, ${result.durationMs} мс`,
+      `Итог: раунд ${outcome.round} из ${rounds.length}, verdict=${outcome.review.verdict}, score=${result.finalScore}/10, инструментов вызвано ${toolCalls.length} (из них поиск по базе знаний ${retrievals.length}), промпты coach ${promptVersions.coach} / reviewer ${promptVersions.reviewer}, ${result.durationMs} мс`,
     );
     saveTrace(task, MODEL, result);
     return result;

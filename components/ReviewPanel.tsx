@@ -4,16 +4,40 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
-import { TOOL_META, VERDICT_META, formatDuration, splitToolCall, type AgentResult } from '@/lib/agent-result';
+import {
+  SEARCH_KNOWLEDGE_TOOL,
+  TOOL_META,
+  VERDICT_META,
+  formatDuration,
+  splitToolCall,
+  type AgentResult,
+  type RetrievalRecord,
+} from '@/lib/agent-result';
 
 type ReviewPanelProps = {
   result: AgentResult;
 };
 
+/**
+ * Записи о поиске по базе знаний, разложенные по позициям `toolCalls`.
+ *
+ * В `toolCalls` лежат только имена, а запрос и найденные заголовки приходят отдельным
+ * списком — в порядке вызовов. Поэтому i-й вызов `searchKnowledge` соответствует i-й записи
+ * `retrievals`; здесь эта пара и восстанавливается, чтобы разметка ниже осталась плоской.
+ * Прогоны до `docs/spec8.md` поля не имеют — тогда массив просто пустой.
+ */
+function retrievalsByPosition(toolCalls: string[], retrievals: RetrievalRecord[]): (RetrievalRecord | undefined)[] {
+  let seen = 0;
+  return toolCalls.map((entry) =>
+    splitToolCall(entry).name === SEARCH_KNOWLEDGE_TOOL ? retrievals[seen++] : undefined,
+  );
+}
+
 /** Итог safety review: вердикт, оценка, история раундов, замечания и параметры прогона. */
 export function ReviewPanel({ result }: ReviewPanelProps) {
   const { review, rounds, finalRound, finalScore, improved, toolCalls, promptVersions, durationMs } = result;
   const meta = VERDICT_META[review.verdict];
+  const retrievals = retrievalsByPosition(toolCalls, result.retrievals ?? []);
 
   return (
     <Card className="enter gap-0 rounded-xl border-border bg-card py-0 shadow-none">
@@ -88,18 +112,40 @@ export function ReviewPanel({ result }: ReviewPanelProps) {
           <ol className="mt-3 space-y-2">
             {toolCalls.map((entry, index) => {
               const { source, name } = splitToolCall(entry);
+              const retrieval = retrievals[index];
               return (
-                <li key={`${index}-${entry}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-                  <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
-                  {/* Источник: с какого MCP-сервера пришёл инструмент или `local`. Старые записи его не имеют. */}
-                  {source && (
-                    <span className="rounded-sm bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-                      {source}
-                    </span>
+                <li key={`${index}-${entry}`} className="text-sm">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
+                    {/* Источник: с какого MCP-сервера пришёл инструмент или `local`. Старые записи его не имеют. */}
+                    {source && (
+                      <span className="rounded-sm bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+                        {source}
+                      </span>
+                    )}
+                    <span className="font-mono text-[13px] text-foreground">{name}</span>
+                    {/* Незнакомое имя показываем как есть: набор инструментов меняется чаще, чем UI. */}
+                    <span className="text-xs text-muted-foreground">{TOOL_META[name] ?? ''}</span>
+                  </div>
+
+                  {/* У поиска по базе знаний имени мало: без запроса и заголовков непонятно,
+                      на что опирался план. Показываем и то и другое — это и есть видимость RAG. */}
+                  {retrieval && (
+                    <div className="mt-1 ml-6 border-l border-border pl-2.5">
+                      <p className="text-xs text-muted-foreground">
+                        🔍 knowledge: «{retrieval.query}» → {retrieval.headings.length} chunks
+                      </p>
+                      {retrieval.headings.length > 0 && (
+                        <ul className="mt-1 space-y-0.5">
+                          {retrieval.headings.map((heading, position) => (
+                            <li key={`${position}-${heading}`} className="text-xs text-muted-foreground">
+                              · {heading}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   )}
-                  <span className="font-mono text-[13px] text-foreground">{name}</span>
-                  {/* Незнакомое имя показываем как есть: набор инструментов меняется чаще, чем UI. */}
-                  <span className="text-xs text-muted-foreground">{TOOL_META[name] ?? ''}</span>
                 </li>
               );
             })}

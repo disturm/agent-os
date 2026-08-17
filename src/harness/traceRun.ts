@@ -32,6 +32,19 @@ export type TraceRound = {
   review: Review;
 };
 
+/**
+ * Одно обращение к базе знаний: с чем пришли и что нашли.
+ *
+ * Тексты чанков сюда не едут — только заголовки: по паре «запрос → заголовки» видно, чем
+ * агент пользовался, а содержимое лежит в `knowledge/*.md` и никуда не девается.
+ * Тип объявлен здесь структурно, как и `TraceSource`: модуль трейса не должен зависеть
+ * ни от `src/rag/`, ни от `src/skills/`.
+ */
+export type TraceRetrieval = {
+  query: string;
+  headings: string[];
+};
+
 export type RunTrace = {
   runId: string;
   task: string;
@@ -39,6 +52,8 @@ export type RunTrace = {
   model: string;
   rounds: TraceRound[];
   toolCalls: string[];
+  /** Retrieval по порядку. i-я запись — i-й вызов `searchKnowledge` из `toolCalls`. */
+  retrievals: TraceRetrieval[];
   finalScore: number;
   verdict: Review['verdict'];
   durationMs: number;
@@ -51,6 +66,7 @@ export type TraceSource = {
   review: Review;
   finalScore: number;
   toolCalls: string[];
+  retrievals: TraceRetrieval[];
   promptVersions: PromptVersions;
   durationMs: number;
 };
@@ -86,6 +102,7 @@ export function saveTrace(task: string, model: string, source: TraceSource): str
       model,
       rounds: source.rounds.map(({ round, plan, review }) => ({ round, planExcerpt: excerpt(plan), review })),
       toolCalls: source.toolCalls,
+      retrievals: source.retrievals,
       finalScore: source.finalScore,
       verdict: source.review.verdict,
       durationMs: source.durationMs,

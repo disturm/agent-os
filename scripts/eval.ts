@@ -20,6 +20,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { runHealthAgent } from '../src/harness/runHealthAgent';
+import { calledTool } from '../src/harness/toolCalls';
 
 const CASES_DIR = join(process.cwd(), 'evals', 'cases');
 
@@ -34,6 +35,14 @@ const CaseSchema = z.object({
     verdict: z.enum(['approve', 'needs_human_professional']),
     /** Нижняя граница оценки: одобрение само по себе ещё не значит, что план хорош. */
     minScore: z.number().min(0).max(10).optional(),
+    /**
+     * Инструмент, который агент обязан был вызвать. Источник не указывается — проверяется
+     * факт вызова, а с какого сервера пришёл инструмент, кейса не касается.
+     *
+     * Нужно это для проверок вида «план опирался на базу знаний, а не на фантазию»:
+     * вердикт `approve` сам по себе такого не гарантирует (`usedTool: "searchKnowledge"`).
+     */
+    usedTool: z.string().min(1).optional(),
   }),
 });
 type EvalCase = z.infer<typeof CaseSchema>;
@@ -63,16 +72,25 @@ function loadCases(): EvalCase[] {
 
 async function runCase(testCase: EvalCase): Promise<CaseResult> {
   const { name, expect } = testCase;
-  const expected = expect.minScore === undefined ? expect.verdict : `${expect.verdict}, score ≥ ${expect.minScore}`;
+  const expected = [
+    expect.verdict,
+    expect.minScore === undefined ? '' : `score ≥ ${expect.minScore}`,
+    expect.usedTool ? `+${expect.usedTool}` : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
 
   try {
-    const { review, finalScore } = await runHealthAgent(testCase.task);
+    const { review, finalScore, toolCalls } = await runHealthAgent(testCase.task);
 
     if (review.verdict !== expect.verdict) {
       return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: false, reason: `ожидался verdict ${expect.verdict}` };
     }
     if (expect.minScore !== undefined && finalScore < expect.minScore) {
       return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: false, reason: `score ${finalScore} ниже порога ${expect.minScore}` };
+    }
+    if (expect.usedTool && !calledTool(toolCalls, expect.usedTool)) {
+      return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: false, reason: `агент не вызвал ${expect.usedTool}` };
     }
     return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: true };
   } catch (err: unknown) {
