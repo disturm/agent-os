@@ -1,20 +1,27 @@
 'use client';
 
-import { DesktopIcon, MoonIcon, SunIcon } from '@radix-ui/react-icons';
 import { useEffect, useState } from 'react';
-
-import { cn } from '@/lib/utils';
 
 type Theme = 'system' | 'light' | 'dark';
 
 const STORAGE_KEY = 'theme';
 const DARK_QUERY = '(prefers-color-scheme: dark)';
 
+/**
+ * Иконки инлайном: по `docs/spec9.md` UI-библиотек в проекте не осталось, а тащить пакет
+ * ради трёх глифов незачем. Пути обычные, из набора Radix Icons.
+ */
+const ICONS: Record<Theme, string> = {
+  system: 'M2 3h12v8H2zM6 13h4M8 11v2',
+  light: 'M8 3.5v-2M8 14.5v-2M12.5 8h2M1.5 8h2M11.2 4.8l1.4-1.4M3.4 12.6l1.4-1.4M11.2 11.2l1.4 1.4M3.4 3.4l1.4 1.4M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z',
+  dark: 'M13 9.5A5.5 5.5 0 016.5 3a5.5 5.5 0 106.5 6.5z',
+};
+
 const OPTIONS = [
-  { value: 'system', label: 'Как в системе', Icon: DesktopIcon },
-  { value: 'light', label: 'Светлая тема', Icon: SunIcon },
-  { value: 'dark', label: 'Тёмная тема', Icon: MoonIcon },
-] as const satisfies readonly { value: Theme; label: string; Icon: typeof DesktopIcon }[];
+  { value: 'system', label: 'Как в системе' },
+  { value: 'light', label: 'Светлая тема' },
+  { value: 'dark', label: 'Тёмная тема' },
+] as const satisfies readonly { value: Theme; label: string }[];
 
 /** Разворачивает выбор в конкретный `data-theme` — единственное место, где живёт эта развилка. */
 function applyTheme(theme: Theme) {
@@ -60,7 +67,7 @@ export function ThemeToggle() {
       aria-label="Тема оформления"
       className="inline-flex shrink-0 gap-0.5 rounded-md border border-border bg-card p-0.5"
     >
-      {OPTIONS.map(({ value, label, Icon }) => (
+      {OPTIONS.map(({ value, label }) => (
         <button
           key={value}
           type="button"
@@ -69,13 +76,13 @@ export function ThemeToggle() {
           aria-label={label}
           title={label}
           onClick={() => setTheme(value)}
-          className={cn(
-            'rounded-sm p-1.5 text-muted-foreground transition-colors outline-none',
-            'hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50',
-            theme === value && 'bg-secondary text-foreground',
-          )}
+          className={`rounded-sm p-1.5 outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring ${
+            theme === value ? 'bg-secondary text-foreground' : 'text-muted-foreground'
+          }`}
         >
-          <Icon className="size-4" />
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" className="size-4">
+            <path d={ICONS[value]} strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </button>
       ))}
     </div>

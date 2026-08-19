@@ -1,5 +1,4 @@
 @import 'tailwindcss';
-@import 'tw-animate-css';
 
 /*
   Тема всегда задана явным атрибутом `data-theme` на <html>: «системную» разрешает

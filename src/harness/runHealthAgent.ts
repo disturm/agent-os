@@ -5,7 +5,8 @@
  * Здесь только последовательность шагов и решения по вердикту. Всё остальное — в соседях:
  * промпты в `promptVersions.ts`, валидация ответа ревьюера в `validateReview.ts`,
  * состояние раундов в `rounds.ts`, итоговые метрики в `score.ts`, имена вызванных
- * инструментов в `toolCalls.ts`, слепок прогона на диск — в `traceRun.ts`.
+ * инструментов в `toolCalls.ts`, слепок прогона на диск — в `traceRun.ts`, формат событий
+ * хода прогона — в `runEvents.ts`.
  * Данные агент берёт с MCP-серверов (`src/mcp/`), производные артефакты
  * считают локальные навыки из `src/skills/`.
  *
@@ -23,8 +24,9 @@ import { assertRagConfigured } from '../rag/retriever';
 import type { RetrievalRecord } from '../skills/knowledge';
 import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptVersions';
 import { createRoundHistory, type RoundState } from './rounds';
+import { IGNORE_EVENTS, type OnEvent } from './runEvents';
 import { finalRound, finalScore, improved } from './score';
-import { calledTool, toolCallNames } from './toolCalls';
+import { calledTool, LOCAL_SOURCE, toolCallNames } from './toolCalls';
 import { saveTrace } from './traceRun';
 import { validateReview, type Review } from './validateReview';
 
@@ -68,6 +70,12 @@ export type RunOptions = {
   minRounds?: number;
   /** Потолок раундов: после него `revise` возвращается как есть. */
   maxRounds?: number;
+  /**
+   * Наблюдатель за ходом прогона (`docs/spec9.md`). Необязателен и ни на что не влияет:
+   * без него порядок шагов, вызовы модели и результат те же самые — отсюда и требование
+   * спеки, что `POST /api/agent/run`, CLI, replay и evals продолжают работать как прежде.
+   */
+  onEvent?: OnEvent;
 };
 
 /**
@@ -86,7 +94,7 @@ export const DEFAULT_MAX_ROUNDS = 3;
  */
 export async function runHealthAgent(
   task: string,
-  { minRounds = DEFAULT_MIN_ROUNDS, maxRounds = DEFAULT_MAX_ROUNDS }: RunOptions = {},
+  { minRounds = DEFAULT_MIN_ROUNDS, maxRounds = DEFAULT_MAX_ROUNDS, onEvent = IGNORE_EVENTS }: RunOptions = {},
 ): Promise<AgentResult> {
   // Проверяем до вызовов модели: параметры кривые — платить за прогон незачем
   if (minRounds < 1) throw new Error('minRounds не может быть меньше 1: без ревью план не отдаётся');
@@ -100,7 +108,7 @@ export async function runHealthAgent(
   assertRagConfigured();
   const mcp = await startConfiguredServers();
   try {
-    return await reviewLoop({ task, minRounds, maxRounds, startedAt, mcp });
+    return await reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit: onEvent });
   } finally {
     await mcp.close();
   }
@@ -113,9 +121,10 @@ type LoopContext = {
   /** Отсчёт для `durationMs`: ведётся снаружи, чтобы в него попал и запуск MCP-серверов. */
   startedAt: number;
   mcp: McpConnections;
+  emit: OnEvent;
 };
 
-async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopContext): Promise<AgentResult> {
+async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit }: LoopContext): Promise<AgentResult> {
   const history = createRoundHistory();
   const toolCalls: string[] = [];
   /**
@@ -131,17 +140,39 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
   const coachPrompt = loadActivePrompt('coach');
   const coach = createCoach(coachPrompt, mcp.draftTools, (record) => {
     retrievals.push(record);
+    emit({ type: 'retrieval', ...record });
     console.log(`  knowledge: «${record.query}» → ${record.headings.length} chunk(s)`);
     for (const heading of record.headings) console.log(`    · ${heading}`);
   });
   const reviewer = createReviewer(loadActivePrompt('reviewer'));
 
+  /**
+   * Живой поток вызовов инструментов для наблюдателя.
+   *
+   * `toolCallNames` разбирает `result.newItems` уже завершившегося круга — для итогового
+   * списка и трейса этого достаточно, а для таймлайна поздно: все вызовы приехали бы разом
+   * вместе с готовым планом. Хуки агента отдают их в момент вызова. Списка в `AgentResult`
+   * это не касается: он по-прежнему собирается из `newItems`, и два канала не пересекаются.
+   *
+   * Источник берётся из той же `mcp.sources`, что и у `toolCallNames`, иначе пометки
+   * в живом таймлайне и в трейсе разошлись бы.
+   */
+  const watchTools = (agent: ReturnType<typeof createCoach>) => {
+    agent.on('agent_tool_start', (_context, tool) =>
+      emit({ type: 'tool_call', name: tool.name, source: mcp.sources.get(tool.name) ?? LOCAL_SOURCE }),
+    );
+    agent.on('agent_tool_end', (_context, tool) => emit({ type: 'tool_result', name: tool.name }));
+  };
+  watchTools(coach);
+
   /** Прогон коуча: заодно пополняет список вызванных инструментов, чтобы это не забывалось на местах. */
-  const askCoach = async (input: string): Promise<string> => {
+  const askCoach = async (input: string, round: number): Promise<string> => {
+    emit({ type: 'coach_start', round });
     const result = await run(coach, input);
     const tools = toolCallNames(result.newItems, mcp.sources);
     toolCalls.push(...tools);
     if (tools.length) console.log(`  tools: ${tools.join(', ')}`);
+    emit({ type: 'coach_end', round });
     return result.finalOutput ?? '';
   };
 
@@ -177,8 +208,10 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
       '',
       `=== ПЛАН ===\n${plan}`,
     ].join('\n');
+    emit({ type: 'saving' });
     try {
       const saver = createPlanSaver(coachPrompt, mcp.approvedTools);
+      watchTools(saver);
       const result = await run(saver, input);
       const tools = toolCallNames(result.newItems, mcp.sources);
       toolCalls.push(...tools);
@@ -226,14 +259,16 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
 
   // Контекст коуча — только задача: профиль, дневник, рецепты и прогноз он берёт инструментами сам
   console.log(`Задача: ${task}\nМодель: ${MODEL}\nMCP: ${mcp.started.join(', ')}\n`);
-  let plan = await askCoach(`=== ЗАДАЧА ===\n${task}`);
+  let plan = await askCoach(`=== ЗАДАЧА ===\n${task}`, 1);
 
   for (let round = 1; round <= maxRounds; round++) {
     // Ревьюер видит только задачу и план: инструментов у него нет, к файлам он не ходит,
     // и проверять он обязан текст, который уедет пользователю, а не состояние диска.
     const prompt = `=== ЗАДАЧА ===\n${task}\n\n=== ПЛАН НА ПРОВЕРКУ ===\n${plan}`;
+    emit({ type: 'review_start', round });
     const review = await validateReview(async (retryHint) => (await run(reviewer, prompt + retryHint)).finalOutput ?? '');
     history.record(plan, review);
+    emit({ type: 'review_done', round, review });
 
     const { verdict, score, issues } = review;
     console.log(`Раунд ${round}: verdict=${verdict}, score=${score}`);
@@ -265,7 +300,7 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp }: LoopCo
     // Каждый прогон коуча начинается с чистого листа: данных из прошлого раунда у него нет,
     // поэтому нужные ему файлы он перечитывает инструментами заново.
     const fix = `=== ЗАДАЧА ===\n${task}\n\n=== ПРЕДЫДУЩИЙ ПЛАН ===\n${plan}\n\n=== ЗАМЕЧАНИЯ РЕВЬЮЕРА ===\n${feedback}`;
-    plan = (await askCoach(fix)) || plan;
+    plan = (await askCoach(fix, round + 1)) || plan;
   }
 
   // Одобрение могло случиться раньше, а последний раунд его не подтвердить —

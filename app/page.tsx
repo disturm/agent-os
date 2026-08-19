@@ -1,96 +1,153 @@
 'use client';
 
-import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
-import { useState, type CSSProperties } from 'react';
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport } from 'ai';
+import { useEffect, useRef, useState } from 'react';
 
-import { AgentForm } from '@/components/AgentForm';
+import { BlockedCard } from '@/components/BlockedCard';
 import { PlanView } from '@/components/PlanView';
-import { ReviewPanel } from '@/components/ReviewPanel';
+import { RunSummary } from '@/components/RunSummary';
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Skeleton } from '@/components/ui/skeleton';
-import type { AgentResult } from '@/lib/agent-result';
+import { Timeline } from '@/components/Timeline';
+import type { ChatMessage } from '@/lib/chat-stream';
 
-type State =
-  | { status: 'idle' }
-  | { status: 'running' }
-  | { status: 'result'; result: AgentResult }
-  | { status: 'error'; message: string };
-
+/**
+ * Чат с агентом (`docs/spec9.md`). Всё состояние — здесь и в `useChat`; истории между
+ * перезагрузками нет и не задумано: ни localStorage, ни базы, ни второго диалога.
+ *
+ * Каждое сообщение — отдельный прогон harness со своей задачей. Предыдущие сообщения
+ * в промпт не уходят: состояния между запросами в проекте нет (`docs/spec2.md`), и чат
+ * здесь — способ показать ход работы, а не переписка с памятью.
+ */
 export default function Page() {
-  const [task, setTask] = useState('');
-  const [state, setState] = useState<State>({ status: 'idle' });
+  const { messages, sendMessage, status, error } = useChat<ChatMessage>({
+    transport: new DefaultChatTransport({ api: '/api/chat' }),
+  });
+  const [input, setInput] = useState('');
+  const bottomRef = useRef<HTMLDivElement>(null);
 
-  async function runAgent() {
-    setState({ status: 'running' });
-    try {
-      const response = await fetch('/api/agent/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? `Ошибка ${response.status}`);
-      setState({ status: 'result', result: data as AgentResult });
-    } catch (err: unknown) {
-      setState({ status: 'error', message: err instanceof Error ? err.message : String(err) });
-    }
+  const busy = status === 'submitted' || status === 'streaming';
+
+  // Автоскролл: сообщения растут по мере стрима, поэтому следим за ними, а не за их числом.
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, status]);
+
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!input.trim() || busy) return;
+    sendMessage({ text: input.trim() });
+    setInput('');
   }
 
-  const running = state.status === 'running';
-  const result = state.status === 'result' ? state.result : null;
-  const blocked = result?.review.verdict === 'needs_human_professional';
-
   return (
-    <div className="mx-auto max-w-6xl px-6 py-12 lg:py-16">
-      <header className="flex items-start justify-between gap-6 border-b border-border pb-8">
+    <div className="mx-auto flex min-h-dvh max-w-3xl flex-col px-6">
+      <header className="flex items-start justify-between gap-6 border-b border-border py-8">
         <div>
-          <h1 className="font-serif text-4xl tracking-[-0.03em] text-primary lg:text-5xl">
+          <h1 className="font-serif text-3xl tracking-[-0.03em] text-primary">
             Wellness-агент
             <span aria-hidden className="ml-2 inline-block size-2 -translate-y-[0.15em] rounded-[2px] bg-brand" />
           </h1>
-          <p className="mt-3 max-w-xl text-sm text-muted-foreground">
-            Коуч по питанию, тренировкам и восстановлению. Каждый план проходит обязательную проверку безопасности.
-            Это не медицинский продукт: диагнозы, лекарства и дозировки вне его компетенции.
+          <p className="mt-2 max-w-xl text-sm text-muted-foreground">
+            Коуч пишет план, Safety Reviewer его проверяет. Это не медицинский продукт: диагнозы, лекарства и
+            дозировки вне его компетенции.
           </p>
         </div>
         <ThemeToggle />
       </header>
 
-      <main className="grid gap-10 pt-10 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] lg:gap-16">
-        <div className="space-y-8 lg:sticky lg:top-12 lg:self-start">
-          <AgentForm task={task} onTaskChange={setTask} onSubmit={runAgent} running={running} />
-          {result && <ReviewPanel result={result} />}
-        </div>
+      <main className="flex-1 space-y-8 py-8" aria-live="polite" aria-busy={busy}>
+        {messages.length === 0 && <EmptyState />}
 
-        <section aria-live="polite" aria-busy={running}>
-          <h2 className="mb-5 text-xs font-medium tracking-[0.12em] text-muted-foreground uppercase">
-            {blocked ? 'Ответ агента' : 'План'}
-          </h2>
+        {messages.map((message) =>
+          message.role === 'user' ? (
+            <UserMessage key={message.id} message={message} />
+          ) : (
+            <AgentMessage key={message.id} message={message} />
+          ),
+        )}
 
-          {state.status === 'idle' && <EmptyState />}
-          {running && <RunningState />}
-          {state.status === 'error' && <ErrorState message={state.message} />}
-          {blocked && <BlockedState />}
-          {result && !blocked && <PlanView plan={result.plan} />}
-        </section>
+        {/* До первой части стрима показывать нечего: серверы MCP ещё поднимаются. */}
+        {status === 'submitted' && <p className="text-sm text-muted-foreground">Поднимаю MCP-серверы…</p>}
+
+        {error && (
+          <p className="rounded-lg bg-stop p-4 font-mono text-xs break-all text-stop-foreground">{error.message}</p>
+        )}
+
+        <div ref={bottomRef} />
       </main>
+
+      <form onSubmit={submit} className="sticky bottom-0 flex gap-3 border-t border-border bg-background py-4">
+        <textarea
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) submit(event);
+          }}
+          disabled={busy}
+          rows={2}
+          placeholder="Составь план питания на завтра"
+          className="flex-1 resize-none rounded-lg border border-input bg-card px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={busy || !input.trim()}
+          className="h-fit self-end rounded-lg bg-brand px-4 py-2.5 text-sm font-medium text-brand-foreground transition-colors hover:bg-brand-hover disabled:opacity-40"
+        >
+          {busy ? 'Работаю…' : 'Отправить'}
+        </button>
+      </form>
     </div>
   );
 }
 
-/** До первого запуска правая колонка объясняет, как устроен прогон. */
+function UserMessage({ message }: { message: ChatMessage }) {
+  const text = message.parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n');
+
+  return (
+    <p className="ml-auto max-w-[85%] rounded-lg bg-secondary px-4 py-2.5 text-sm whitespace-pre-wrap text-secondary-foreground">
+      {text}
+    </p>
+  );
+}
+
+/**
+ * Ответ агента: таймлайн этапов, затем план (или карточка предохранителя), затем итог.
+ * Порядок задаёт сервер — части рисуются в том же порядке, в каком записаны в стрим.
+ */
+function AgentMessage({ message }: { message: ChatMessage }) {
+  const plan = message.parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('');
+  const blocked = message.parts.find((part) => part.type === 'data-blocked');
+  const summary = message.parts.find((part) => part.type === 'data-summary');
+
+  return (
+    <article className="space-y-6">
+      <Timeline parts={message.parts} />
+      {blocked && <BlockedCard issues={blocked.data.issues} />}
+      {plan && <PlanView plan={plan} />}
+      {summary && <RunSummary {...summary.data} />}
+    </article>
+  );
+}
+
+/** До первого запуска экран объясняет, как устроен прогон. */
 function EmptyState() {
   const steps = [
-    ['Health Coach', 'Сам берёт профиль, дневник и рецепты инструментами и пишет план под задачу.'],
+    ['Health Coach', 'Сам берёт профиль, дневник и рецепты инструментами, ищет в базе знаний и пишет план.'],
     ['Safety Reviewer', 'Видит только план, проверяет границы wellness и ставит оценку до 10.'],
-    ['Revision loop', 'До трёх раундов правок; одобренный план агент сохраняет в output.md.'],
+    ['Revision loop', 'До трёх раундов правок; одобренный план агент сохраняет сам.'],
   ];
 
   return (
-    <ol className="max-w-lg divide-y divide-border border-y border-border">
+    <ol className="divide-y divide-border border-y border-border">
       {steps.map(([title, description], index) => (
-        <li key={title} className="enter flex gap-4 py-4" style={{ '--index': index } as CSSProperties}>
+        <li key={title} className="flex gap-4 py-4">
           <span className="font-mono text-xs text-brand">{String(index + 1).padStart(2, '0')}</span>
           <div>
             <p className="text-sm font-medium">{title}</p>
@@ -99,43 +156,5 @@ function EmptyState() {
         </li>
       ))}
     </ol>
-  );
-}
-
-function RunningState() {
-  return (
-    <div className="max-w-2xl space-y-3" aria-label="Агент работает">
-      <Skeleton className="h-6 w-1/3 rounded-sm bg-secondary" />
-      <Skeleton className="h-4 w-full rounded-sm bg-secondary" />
-      <Skeleton className="h-4 w-11/12 rounded-sm bg-secondary" />
-      <Skeleton className="h-4 w-4/5 rounded-sm bg-secondary" />
-      <Skeleton className="mt-8 h-6 w-1/4 rounded-sm bg-secondary" />
-      <Skeleton className="h-4 w-full rounded-sm bg-secondary" />
-      <Skeleton className="h-4 w-3/4 rounded-sm bg-secondary" />
-    </div>
-  );
-}
-
-function ErrorState({ message }: { message: string }) {
-  return (
-    <Alert variant="destructive" className="enter max-w-2xl rounded-lg shadow-none">
-      <ExclamationTriangleIcon />
-      <AlertTitle className="line-clamp-none">Прогон не завершился</AlertTitle>
-      <AlertDescription className="font-mono text-xs break-all">{message}</AlertDescription>
-    </Alert>
-  );
-}
-
-/** Предохранитель: при needs_human_professional план не показывается вообще. */
-function BlockedState() {
-  return (
-    <Alert className="enter max-w-2xl rounded-lg border-transparent bg-stop text-stop-foreground shadow-none">
-      <ExclamationTriangleIcon />
-      <AlertTitle className="line-clamp-none text-base">Этот запрос требует консультации специалиста</AlertTitle>
-      <AlertDescription className="text-stop-foreground/80">
-        Safety Reviewer остановил прогон: задача выходит за границы wellness-коучинга. Обратитесь к врачу или
-        профильному специалисту — план не составлялся.
-      </AlertDescription>
-    </Alert>
   );
 }
