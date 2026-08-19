@@ -5,15 +5,19 @@
  *
  * Смысл — увидеть цену правки: поменяли промпт, переключили модель, тронули loop, и разница
  * видна построчно, а не «на глаз по ощущениям». Скрипт ничего не решает и ничего не чинит:
- * читает трейс, зовёт `runHealthAgent` и печатает сравнение. Новый прогон harness сам
+ * читает трейс, зовёт `runOS` и печатает сравнение. Новый прогон harness сам
  * запишет в `runs/` — его тоже можно будет взять за основу следующего сравнения.
+ *
+ * По `docs/specA.md` повторяется весь продукт, вместе с маршрутизацией: сменившийся модуль
+ * объясняет разницу в наборе инструментов лучше, чем любое сравнение планов.
  *
  * Прогон платный: те же 7+ вызовов модели, что и обычный запуск.
  */
 
 import 'dotenv/config'; // первым: harness читает env при загрузке модуля
-import { MODEL, runHealthAgent, type AgentResult } from '../src/harness/runHealthAgent';
+import { MODEL } from '../src/harness/runHealthAgent';
 import { readTrace, type RunTrace } from '../src/harness/traceRun';
+import { runOS, type OsResult } from '../src/os/runOS';
 
 const LABEL_WIDTH = 12;
 const VALUE_WIDTH = 34;
@@ -62,11 +66,20 @@ function row(label: string, before: string, after: string, compare = true): void
   console.log(`    стало: ${after}`);
 }
 
-function printDiff(trace: RunTrace, fresh: AgentResult): void {
+/** Модуль OS и уверенность роутера: `nutrition (0.92)`. В трейсах до `docs/specA.md` полей нет. */
+function moduleOf(module: string | undefined, confidence: number | undefined): string {
+  if (!module) return '—';
+  return typeof confidence === 'number' ? `${module} (${confidence.toFixed(2)})` : module;
+}
+
+function printDiff(trace: RunTrace, fresh: OsResult): void {
   console.log(`\n=== Сравнение: трейс ${trace.runId} vs текущий прогон ===\n`);
   console.log(`  ${'Параметр'.padEnd(LABEL_WIDTH)} ${'Было'.padEnd(VALUE_WIDTH)} Стало`);
 
   row('verdict', dash(trace.verdict), fresh.review.verdict);
+  // Модуль стоит рядом с вердиктом, а не с промптами: разошёлся он — дальше разойдётся всё,
+  // и остальные `≠` объясняются им, а не правкой промпта.
+  row('модуль', moduleOf(trace.module, trace.intentConfidence), moduleOf(fresh.module, fresh.intentConfidence));
   row('score', `${dash(trace.finalScore?.toString())}/10`, `${fresh.finalScore}/10`);
   row('раунды', roundsOf(trace.rounds), roundsOf(fresh.rounds));
   row('toolCalls', dash(trace.toolCalls?.join(', ')), dash(fresh.toolCalls.join(', ')));
@@ -92,7 +105,7 @@ async function main(): Promise<number> {
   console.log(`Задача: ${trace.task}\n`);
   console.log('Прогоняю ту же задачу через текущий harness...\n');
 
-  const fresh = await runHealthAgent(trace.task);
+  const fresh = await runOS(trace.task);
   printDiff(trace, fresh);
   return 0;
 }

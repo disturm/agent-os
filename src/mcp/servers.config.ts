@@ -54,8 +54,19 @@ export const MCP_SERVERS: McpServerConfig[] = [
     command: process.execPath,
     args: ['--import', 'tsx', join('src', 'mcp', 'markdownHealthServer.ts')],
     enabled: true,
-    // append_daily_log сервер публикует, но в наборы не входит: дневник ведёт человек.
-    draftTools: ['read_profile', 'read_recent_logs', 'list_recipes'],
+    /**
+     * `append_daily_log` и `update_preferences` сервер публикует, но в наборы они не входят:
+     * дневник и предпочтения ведёт человек, а по `docs/specA.md` их дописывает шаг
+     * обновления памяти — прямым `callTool` из кода, минуя агента.
+     *
+     * `check_habit` в черновом наборе, хотя и пишет: он дописывает отметку в трекер
+     * идемпотентно и ничего не перезаписывает, а фиксирует факт, о котором сказал сам
+     * пользователь, а не результат ещё не одобренного плана. Правило «необратимое — после
+     * approve» осталось на месте: под ним артефакты плана (output.md, plans/, Notion),
+     * и они по-прежнему только в `approvedTools`. Достаётся `check_habit` при этом одному
+     * модулю — `habits` (см. `src/os/modules/habits.ts`).
+     */
+    draftTools: ['read_profile', 'read_recent_logs', 'list_recipes', 'read_habits', 'check_habit'],
     approvedTools: ['save_health_plan'],
   },
   {

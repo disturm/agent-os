@@ -1,6 +1,6 @@
-// Тонкий CLI-враппер над runHealthAgent: вся логика живёт в src/harness/runHealthAgent.ts
+// Тонкий CLI-враппер над OS: вся логика живёт в src/os/runOS.ts и src/harness/runHealthAgent.ts
 import 'dotenv/config'; // должен быть первым: harness читает env при загрузке модуля
-import { runHealthAgent } from './src/harness/runHealthAgent';
+import { runOS } from './src/os/runOS';
 
 async function main(): Promise<number> {
   const task = process.argv[2];
@@ -9,7 +9,7 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const { review } = await runHealthAgent(task);
+  const { review } = await runOS(task);
   return review.verdict === 'revise' ? 1 : 0;
 }
 

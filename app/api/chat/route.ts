@@ -1,9 +1,12 @@
 /**
- * Стриминговый роут чата (`docs/spec9.md`).
+ * Стриминговый роут чата (`docs/spec9.md`, `docs/specA.md`).
  *
- * Тонкая обёртка, как и соседний `/api/agent/run`: прогон целиком принадлежит harness,
+ * Тонкая обёртка, как и соседний `/api/agent/run`: прогон целиком принадлежит OS и harness,
  * перевод его событий в части стрима — `timeline.ts`, а здесь только разбор запроса,
  * порядок трёх выходов (таймлайн → текст плана → итог) и ответ.
+ *
+ * Зовётся `runOS`, а не `runHealthAgent`: маршрутизация по модулям — часть продукта,
+ * а не отладочный режим. Первым в таймлайн приезжает выбранный модуль.
  *
  * Истории чата в промпт не уходит: одна задача — один прогон, состояния между запросами
  * в проекте нет (`docs/spec2.md`). `messages` нужны ровно затем, чтобы взять из последнего
@@ -11,7 +14,7 @@
  */
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessageStreamWriter } from 'ai';
-import { runHealthAgent } from '../../../src/harness/runHealthAgent';
+import { runOS } from '../../../src/os/runOS';
 import type { ChatMessage } from '../../../lib/chat-stream';
 import { createTimeline } from './timeline';
 
@@ -74,7 +77,7 @@ export async function POST(request: Request) {
   const stream = createUIMessageStream<ChatMessage>({
     execute: async ({ writer }) => {
       const timeline = createTimeline(writer);
-      const result = await runHealthAgent(task, { onEvent: timeline.handle });
+      const result = await runOS(task, { onEvent: timeline.handle });
       timeline.closeSteps(result);
 
       // Предохранитель: плана нет и печатать нечего — вместо него карточка со специалистом.

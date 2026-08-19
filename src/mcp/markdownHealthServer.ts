@@ -9,12 +9,16 @@
  *
  * Что отдаётся наружу:
  *   tools     read_profile, read_recent_logs(days), append_daily_log(entry),
- *             save_health_plan(markdown), list_recipes
- *   resources profile://me, logs://recent, recipes://all, plans://latest
+ *             save_health_plan(markdown), list_recipes,
+ *             read_habits, check_habit(habit), update_preferences(preference)
+ *   resources profile://me, logs://recent, recipes://all, plans://latest, habits://all
  *
  * Набор инструментов сервера и набор инструментов агента — разные вещи: право на вызов
  * раздаёт harness (`runHealthAgent.ts`), поэтому, например, `append_daily_log` сервер
  * публикует, а коучу его никто не даёт — дневник это ручные данные пользователя.
+ * По `docs/spec6.md` таких инструментов был один, по `docs/specA.md` их три:
+ * `append_daily_log` и `update_preferences` зовёт шаг обновления памяти в `src/os/`,
+ * напрямую через `callTool`, минуя агента.
  *
  * ВАЖНО: `stdout` занят протоколом JSON-RPC. Любая диагностика — только в `stderr`
  * (`console.error`), иначе клиент получит мусор вместо ответа.
@@ -25,12 +29,15 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import {
   appendDailyLog,
+  checkHabit,
+  readHabits,
   readLatestPlan,
   readProfile,
   readRecentLog,
   readRecipes,
   RECENT_LOG_DAYS,
   saveHealthPlan,
+  updatePreferences,
 } from './markdownData';
 
 const MARKDOWN = 'text/markdown';
@@ -53,6 +60,8 @@ server.registerTool(
       'Возвращает профиль пользователя как markdown: возраст, рост и вес, город, характер работы,',
       'цели, ограничения (травмы, аллергии, пищевые непереносимости), предпочтения в еде и тренировках,',
       'текущие привычки.',
+      'Вместе с профилем возвращаются подтверждённые предпочтения (data/preferences.md) —',
+      'то, что пользователь просил запомнить сам; отдельного инструмента для них нет.',
       'Здесь же берётся локация для прогноза погоды: города в профиле нет — его неоткуда взять.',
       'Вызывай ПЕРВЫМ в любой задаче про питание, тренировки, режим дня или покупки:',
       'без ограничений из профиля план может оказаться опасным (аллергия, травма) или невыполнимым.',
@@ -149,6 +158,73 @@ server.registerTool(
   async ({ entry }) => text(appendDailyLog(entry)),
 );
 
+// --- Привычки и предпочтения (docs/specA.md) ---
+
+server.registerTool(
+  'read_habits',
+  {
+    title: 'Трекер привычек',
+    description: [
+      'Возвращает трекер привычек как markdown: раздел на привычку, у каждой цель',
+      '(«5 дней из 7», «каждый день») и список дат, когда она была выполнена.',
+      'Вызывай, когда задача про привычки, регулярность, серии и срывы: «как я держу режим»,',
+      '«отметь, что я сегодня…», «почему разваливается вечерний ритуал».',
+      'Профиль это не заменяет: там цели и ограничения, здесь — факт выполнения по дням.',
+      'Параметров нет.',
+    ].join(' '),
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => text(readHabits()),
+);
+
+server.registerTool(
+  'check_habit',
+  {
+    title: 'Отметить привычку выполненной',
+    description: [
+      'Ставит сегодняшнюю отметку у привычки в data/habits.md.',
+      'Вызывай только тогда, когда пользователь сам сказал, что привычка выполнена',
+      '(«сегодня лёг до полуночи», «отметь тренировку»), — это фиксация его слов, а не',
+      'твоя оценка плана. Ничего не планируй этим инструментом и не отмечай впрок.',
+      'Имя привычки бери из read_habits: новых привычек инструмент не заводит и вернёт',
+      'список существующих, если имя не совпало. Повторный вызов за тот же день ничего',
+      'не меняет — отметка уже стоит.',
+    ].join(' '),
+    inputSchema: {
+      habit: z
+        .string()
+        .min(1)
+        .describe('Название привычки так, как оно стоит заголовком в трекере: «Вода 2 литра в день».'),
+    },
+    // Дописывающая и идемпотентная правка: прежние отметки и разделы не трогаются,
+    // повтор за тот же день — no-op. Поэтому destructiveHint здесь false.
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  },
+  async ({ habit }) => text(checkHabit(habit)),
+);
+
+server.registerTool(
+  'update_preferences',
+  {
+    title: 'Записать подтверждённое предпочтение',
+    description: [
+      'Дописывает подтверждённое предпочтение в data/preferences.md — то, что пользователь',
+      'просил запомнить явно: «мне понравилось», «запомни», «больше так не предлагай».',
+      'Прежние строки не трогает, дословный дубль не добавляет.',
+      'Инструмент служебный: его зовёт шаг обновления памяти в коде, а не агент по ходу плана.',
+    ].join(' '),
+    inputSchema: {
+      preference: z
+        .string()
+        .min(1)
+        .describe('Предпочтение одной строкой, словами пользователя. Без пересказа и без домыслов.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  async ({ preference }) => text(updatePreferences(preference)),
+);
+
 // --- Resources ---
 // Вторая половина протокола: те же данные, но адресуемые по URI и без вызова инструмента.
 // Агенту через OpenAI Agents SDK достаются только tools — ресурсы видны в `npm run mcp:inspect`
@@ -159,7 +235,12 @@ const resource = (uri: string, title: string, description: string, read: () => s
     contents: [{ uri: url.href, mimeType: MARKDOWN, text: read() }],
   }));
 
-resource('profile://me', 'Профиль', 'Цели, ограничения и предпочтения пользователя (data/profile.md)', readProfile);
+resource(
+  'profile://me',
+  'Профиль',
+  'Цели, ограничения и предпочтения пользователя (data/profile.md + data/preferences.md)',
+  readProfile,
+);
 resource(
   'logs://recent',
   'Дневник',
@@ -168,6 +249,7 @@ resource(
 );
 resource('recipes://all', 'Рецепты', 'Блюда, которые пользователь уже готовит (data/recipes.md)', readRecipes);
 resource('plans://latest', 'Последний план', 'Последний одобренный план (data/output.md)', readLatestPlan);
+resource('habits://all', 'Привычки', 'Трекер привычек и отметки по дням (data/habits.md)', readHabits);
 
 await server.connect(new StdioServerTransport());
 console.error('markdown-health MCP: готов, транспорт stdio');

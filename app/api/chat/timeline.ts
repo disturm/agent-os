@@ -22,6 +22,8 @@ import type { ChatMessage, StepData, ToolData } from '../../../lib/chat-stream';
 
 type Writer = UIMessageStreamWriter<ChatMessage>;
 
+/** Шаг выбора модуля. Один на прогон и всегда первый: маршрутизация идёт до цикла. */
+const MODULE = 'module';
 /** Ключи шагов круга. `id` части — `<ключ>-<номер раунда>`, чтобы раунды не перезаписывали друг друга. */
 const READING = 'reading';
 const KNOWLEDGE = 'knowledge';
@@ -97,6 +99,17 @@ export function createTimeline(writer: Writer): Timeline {
 
   const handle: OnEventHandler = (event) => {
     switch (event.type) {
+      case 'module': {
+        // Сразу `done`: выбор модуля уже состоялся к моменту события, ждать в таймлайне нечего.
+        // Шаг приезжает первым и остаётся сверху — маршрутизация идёт до первого круга коуча.
+        putStep(MODULE, {
+          label: `🧭 Module: ${event.module}`,
+          status: 'done',
+          detail: `confidence ${event.confidence.toFixed(2)}`,
+        });
+        return;
+      }
+
       case 'coach_start': {
         round = event.round;
         // Первый круг — черновик, дальше доработка по замечаниям: у спеки это разные шаги.

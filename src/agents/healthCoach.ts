@@ -22,6 +22,24 @@ function localDraftTools(onRetrieval: OnRetrieval): Tool[] {
 }
 
 /**
+ * Оставляет из набора только названные инструменты, в порядке белого списка.
+ *
+ * Имя, которого в наборе нет, — это опечатка в модуле OS или инструмент с выключенного
+ * сервера. Молча отдать набор короче запрошенного нельзя: модуль объявил, что инструмент
+ * ему нужен, а коуч пойдёт сочинять данные вместо вызова. Падаем сразу — агент собирается
+ * до первого платного вызова.
+ */
+function pickTools(available: Tool[], names: readonly string[]): Tool[] {
+  return names.map((name) => {
+    const found = available.find((tool) => tool.name === name);
+    if (!found) {
+      throw new Error(`Инструмент ${name} недоступен. Есть: ${available.map((tool) => tool.name).join(', ')}`);
+    }
+    return found;
+  });
+}
+
+/**
  * Health Coach: пишет wellness-план под задачу.
  *
  * Системный промпт живёт в `prompts/healthCoach.<версия>.md` — сюда он приходит готовым
@@ -31,13 +49,23 @@ function localDraftTools(onRetrieval: OnRetrieval): Tool[] {
  *
  * `onRetrieval` — колбэк для записей о поиске по базе знаний (`docs/spec8.md`). Куда они
  * лягут, агент не знает: он только прокидывает его в инструмент.
+ *
+ * `allowedTools` — белый список имён от модуля OS (`docs/specA.md`): специализация модуля
+ * это промпт плюс сокращённый набор. `undefined` — набор целиком, то есть поведение до
+ * появления OS. Решение по-прежнему принимает не агент: сюда список приходит готовым.
  */
-export function createCoach(instructions: string, mcpTools: Tool[], onRetrieval: OnRetrieval) {
+export function createCoach(
+  instructions: string,
+  mcpTools: Tool[],
+  onRetrieval: OnRetrieval,
+  allowedTools?: readonly string[],
+) {
+  const all = [...mcpTools, ...localDraftTools(onRetrieval)];
   return new Agent({
     name: 'Health Coach',
     model: MODEL,
     instructions,
-    tools: [...mcpTools, ...localDraftTools(onRetrieval)],
+    tools: allowedTools ? pickTools(all, allowedTools) : all,
   });
 }
 

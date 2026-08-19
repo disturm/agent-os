@@ -1,4 +1,12 @@
-import { runHealthAgent } from '../../../../src/harness/runHealthAgent';
+/**
+ * Нестриминговый вход: весь результат одним JSON-ом. Нужен CLI, скриптам и curl.
+ *
+ * Тонкая обёртка над OS: логики здесь нет, результат отдаётся как есть. По `docs/specA.md`
+ * зовётся `runOS`, поэтому в ответе прибавились `module` и `intentConfidence` — остальные
+ * поля те же, что и были.
+ */
+
+import { runOS } from '../../../../src/os/runOS';
 
 export const maxDuration = 300; // цикл до 3 раундов — это долго
 
@@ -15,7 +23,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    return Response.json(await runHealthAgent(task.trim()));
+    return Response.json(await runOS(task.trim()));
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Ошибка: ${message}`);

@@ -1,9 +1,10 @@
 /**
- * Оркестратор прогона: поднимает MCP-серверы, собирает провайдер, промпты, агентов,
- * историю раундов и метрики.
+ * Оркестратор прогона: поднимает MCP-серверы, собирает промпты, агентов, историю раундов
+ * и метрики.
  *
  * Здесь только последовательность шагов и решения по вердикту. Всё остальное — в соседях:
- * промпты в `promptVersions.ts`, валидация ответа ревьюера в `validateReview.ts`,
+ * настройка провайдера в `provider.ts`, промпты в `promptVersions.ts`,
+ * валидация ответа ревьюера в `validateReview.ts`,
  * состояние раундов в `rounds.ts`, итоговые метрики в `score.ts`, имена вызванных
  * инструментов в `toolCalls.ts`, слепок прогона на диск — в `traceRun.ts`, формат событий
  * хода прогона — в `runEvents.ts`.
@@ -15,14 +16,14 @@
  * (`docs/spec7.md`); harness распоряжается не составом наборов, а моментом их выдачи.
  */
 
-import OpenAI from 'openai';
-import { run, setDefaultOpenAIClient, setOpenAIAPI, setTracingDisabled } from '@openai/agents';
+import { run } from '@openai/agents';
 import { createCoach, createPlanSaver } from '../agents/healthCoach';
 import { createReviewer } from '../agents/safetyReviewer';
-import { startConfiguredServers, type McpConnections } from '../mcp/mcpClients';
+import { startConfiguredServers, type McpCallTool, type McpConnections } from '../mcp/mcpClients';
 import { assertRagConfigured } from '../rag/retriever';
 import type { RetrievalRecord } from '../skills/knowledge';
 import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptVersions';
+import { MODEL } from './provider';
 import { createRoundHistory, type RoundState } from './rounds';
 import { IGNORE_EVENTS, type OnEvent } from './runEvents';
 import { finalRound, finalScore, improved } from './score';
@@ -30,13 +31,9 @@ import { calledTool, LOCAL_SOURCE, toolCallNames } from './toolCalls';
 import { saveTrace } from './traceRun';
 import { validateReview, type Review } from './validateReview';
 
-// --- Провайдер: DeepSeek через OpenAI-совместимый API ---
-const apiKey = process.env.DEEPSEEK_API_KEY;
-if (!apiKey) throw new Error('Нет DEEPSEEK_API_KEY в .env (см. .env.example)');
-setDefaultOpenAIClient(new OpenAI({ baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com', apiKey }));
-setOpenAIAPI('chat_completions'); // DeepSeek говорит на /chat/completions, не на Responses API
-setTracingDisabled(true);
-export const MODEL = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro';
+// Провайдер настраивается импортом `./provider` — там же живёт и проверка ключа.
+// Здесь он только переэкспортируется: `MODEL` уезжает в трейс и в replay.
+export { MODEL };
 
 export type AgentResult = {
   plan: string;
@@ -65,6 +62,19 @@ export type AgentResult = {
   durationMs: number;
 };
 
+/**
+ * Что доступно шагу обновления памяти. Прогон к этому моменту закончен и одобрен,
+ * MCP-серверы ещё подняты — это и есть единственное окно, в котором можно дописать дневник
+ * и предпочтения, не поднимая процессы во второй раз.
+ */
+export type ApprovedContext = {
+  task: string;
+  /** Итоговый план — тот же текст, что уехал пользователю и в `data/output.md`. */
+  plan: string;
+  /** Прямой вызов MCP-инструмента: `append_daily_log` и `update_preferences` агенту не выдаются. */
+  callTool: McpCallTool;
+};
+
 export type RunOptions = {
   /** Сколько раундов ревью обязательны, даже если план одобрен раньше. */
   minRounds?: number;
@@ -76,6 +86,35 @@ export type RunOptions = {
    * спеки, что `POST /api/agent/run`, CLI, replay и evals продолжают работать как прежде.
    */
   onEvent?: OnEvent;
+  /**
+   * Специализация модуля OS (`docs/specA.md`): промпт коуча вместо активной версии.
+   * `undefined` — активный промпт из `promptVersions.ts`, то есть поведение до OS.
+   *
+   * Про модули harness не знает: сюда приходит готовый текст, ровно как из `loadActivePrompt`.
+   */
+  coachInstructions?: string;
+  /**
+   * Белый список черновых инструментов по именам. `undefined` — весь доступный набор.
+   * Имя, которого в наборе нет, роняет прогон до первого платного вызова (см. `createCoach`).
+   *
+   * Шага фиксации это не касается: `approvedTools` собирает конфиг, и модуль их не сужает —
+   * право на необратимую запись остаётся вопросом состояния прогона, а не специализации.
+   */
+  draftTools?: readonly string[];
+  /**
+   * Метка маршрутизации для трейса: какой модуль выбран и насколько уверенно.
+   * На сам прогон не влияет — влияют `coachInstructions` и `draftTools`.
+   */
+  routing?: { module: string; intentConfidence: number };
+  /**
+   * Шаг после `approve` и сохранения плана (`docs/specA.md`): обновление памяти.
+   *
+   * Момент принадлежит harness — серверы ещё подняты, план уже зафиксирован, — а что именно
+   * записать, решает вызывающий (`src/os/memory.ts`). Без колбэка прогон идёт как прежде.
+   * Сбой шага прогон не роняет по той же причине, что и сбой сохранения: план уже готов
+   * и оплачен, а память — дело служебное.
+   */
+  afterApprove?: (context: ApprovedContext) => Promise<void>;
 };
 
 /**
@@ -94,7 +133,15 @@ export const DEFAULT_MAX_ROUNDS = 3;
  */
 export async function runHealthAgent(
   task: string,
-  { minRounds = DEFAULT_MIN_ROUNDS, maxRounds = DEFAULT_MAX_ROUNDS, onEvent = IGNORE_EVENTS }: RunOptions = {},
+  {
+    minRounds = DEFAULT_MIN_ROUNDS,
+    maxRounds = DEFAULT_MAX_ROUNDS,
+    onEvent = IGNORE_EVENTS,
+    coachInstructions,
+    draftTools,
+    routing,
+    afterApprove,
+  }: RunOptions = {},
 ): Promise<AgentResult> {
   // Проверяем до вызовов модели: параметры кривые — платить за прогон незачем
   if (minRounds < 1) throw new Error('minRounds не может быть меньше 1: без ревью план не отдаётся');
@@ -108,7 +155,18 @@ export async function runHealthAgent(
   assertRagConfigured();
   const mcp = await startConfiguredServers();
   try {
-    return await reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit: onEvent });
+    return await reviewLoop({
+      task,
+      minRounds,
+      maxRounds,
+      startedAt,
+      mcp,
+      emit: onEvent,
+      coachInstructions,
+      draftTools,
+      routing,
+      afterApprove,
+    });
   } finally {
     await mcp.close();
   }
@@ -122,9 +180,20 @@ type LoopContext = {
   startedAt: number;
   mcp: McpConnections;
   emit: OnEvent;
-};
+} & Pick<RunOptions, 'coachInstructions' | 'draftTools' | 'routing' | 'afterApprove'>;
 
-async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit }: LoopContext): Promise<AgentResult> {
+async function reviewLoop({
+  task,
+  minRounds,
+  maxRounds,
+  startedAt,
+  mcp,
+  emit,
+  coachInstructions,
+  draftTools,
+  routing,
+  afterApprove,
+}: LoopContext): Promise<AgentResult> {
   const history = createRoundHistory();
   const toolCalls: string[] = [];
   /**
@@ -137,13 +206,23 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit }: 
   // Агенты собираются на прогон: промпт приходит из файла активной версии,
   // читающие инструменты — со всех поднятых MCP-серверов одним списком.
   // Что необратимо (запись плана, файл, страница в Notion), в этот набор не входит.
-  const coachPrompt = loadActivePrompt('coach');
-  const coach = createCoach(coachPrompt, mcp.draftTools, (record) => {
-    retrievals.push(record);
-    emit({ type: 'retrieval', ...record });
-    console.log(`  knowledge: «${record.query}» → ${record.headings.length} chunk(s)`);
-    for (const heading of record.headings) console.log(`    · ${heading}`);
-  });
+  // Промпт модуля OS, если он есть, — вместо активного: специализация это тот же коуч
+  // с другой инструкцией и суженным набором, а не второй агент (`docs/specA.md`).
+  // Шаг фиксации остаётся на базовом промпте: сохранение одинаково во всех модулях, а текст
+  // модуля перечисляет черновые инструменты, которых на этом шаге у агента уже нет.
+  const basePrompt = loadActivePrompt('coach');
+  const coachPrompt = coachInstructions ?? basePrompt;
+  const coach = createCoach(
+    coachPrompt,
+    mcp.draftTools,
+    (record) => {
+      retrievals.push(record);
+      emit({ type: 'retrieval', ...record });
+      console.log(`  knowledge: «${record.query}» → ${record.headings.length} chunk(s)`);
+      for (const heading of record.headings) console.log(`    · ${heading}`);
+    },
+    draftTools,
+  );
   const reviewer = createReviewer(loadActivePrompt('reviewer'));
 
   /**
@@ -210,7 +289,7 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit }: 
     ].join('\n');
     emit({ type: 'saving' });
     try {
-      const saver = createPlanSaver(coachPrompt, mcp.approvedTools);
+      const saver = createPlanSaver(basePrompt, mcp.approvedTools);
       watchTools(saver);
       const result = await run(saver, input);
       const tools = toolCallNames(result.newItems, mcp.sources);
@@ -233,10 +312,32 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit }: 
    * И здесь же пишется трейс — по той же причине, по которой выход один: прогон, ушедший
    * мимо `runs/`, потом не с чем сравнить. Запись трейса прогон не роняет (см. `saveTrace`).
    */
+  /**
+   * Обновление памяти после одобрения (`docs/specA.md`).
+   *
+   * Стоит здесь, а не в `src/os/`, только моментом: серверы ещё подняты, план уже
+   * зафиксирован, и это единственное окно, в котором дневник и предпочтения дописываются
+   * без второго запуска процессов. Что именно записать, harness не решает — это колбэк.
+   *
+   * Сбой не роняет прогон по той же причине, что и сбой сохранения: план готов и оплачен,
+   * а не дописанная строка в дневнике — потеря служебная.
+   */
+  const updateMemory = async (plan: string) => {
+    if (!afterApprove) return;
+    try {
+      await afterApprove({ task, plan, callTool: mcp.callTool });
+    } catch (err: unknown) {
+      console.warn(`\n! память не обновлена: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const finish = async (): Promise<AgentResult> => {
     const rounds = history.all();
     const outcome = finalRound(rounds)!;
-    if (outcome.review.verdict === 'approve') await saveApprovedPlan(outcome);
+    if (outcome.review.verdict === 'approve') {
+      await saveApprovedPlan(outcome);
+      await updateMemory(outcome.plan);
+    }
 
     const result: AgentResult = {
       plan: outcome.plan,
@@ -253,7 +354,7 @@ async function reviewLoop({ task, minRounds, maxRounds, startedAt, mcp, emit }: 
     console.log(
       `Итог: раунд ${outcome.round} из ${rounds.length}, verdict=${outcome.review.verdict}, score=${result.finalScore}/10, инструментов вызвано ${toolCalls.length} (из них поиск по базе знаний ${retrievals.length}), промпты coach ${promptVersions.coach} / reviewer ${promptVersions.reviewer}, ${result.durationMs} мс`,
     );
-    saveTrace(task, MODEL, result);
+    saveTrace(task, MODEL, { ...result, routing });
     return result;
   };
 

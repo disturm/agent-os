@@ -27,6 +27,15 @@ const CONNECT_TIMEOUT_SECONDS = 90;
 /** Имя инструмента → имя сервера, который его отдал. Всё, чего нет в карте, — локальный `tool()`. */
 export type ToolSources = ReadonlyMap<string, string>;
 
+/**
+ * Прямой вызов инструмента в обход агента.
+ *
+ * Нужен шагу обновления памяти (`docs/specA.md`): `append_daily_log` и `update_preferences`
+ * пишет код, а не модель, и выдавать их агенту ради этого нельзя — дневник и предпочтения
+ * ведёт человек. Инструмент, вызванный так, в набор агента не попадает вовсе.
+ */
+export type McpCallTool = (serverName: string, toolName: string, args: Record<string, unknown>) => Promise<string>;
+
 export type McpConnections = {
   /** Инструменты черновых кругов: со всех поднятых серверов, одним списком. */
   draftTools: Tool[];
@@ -35,6 +44,8 @@ export type McpConnections = {
   sources: ToolSources;
   /** Имена поднятых серверов в порядке конфига — для лога прогона. */
   started: string[];
+  /** Вызвать инструмент напрямую, не отдавая его агенту. */
+  callTool: McpCallTool;
   close(): Promise<void>;
 };
 
@@ -138,11 +149,13 @@ export async function startConfiguredServers(configs: McpServerConfig[] = MCP_SE
     const approvedTools: Tool[] = [];
     const sources = new Map<string, string>();
     const started: string[] = [];
+    const byName = new Map<string, MCPServerStdio>();
 
     for (const config of enabledServers(configs)) {
       const server = await startServer(config);
       running.push(server);
       started.push(config.name);
+      byName.set(config.name, server);
 
       // Карта источников строится по полному списку сервера, а не по выданным наборам:
       // пометить в трейсе надо любой вызов, включая тот, которого мы не ожидали.
@@ -153,7 +166,22 @@ export async function startConfiguredServers(configs: McpServerConfig[] = MCP_SE
       approvedTools.push(...selectMcpTools(available, config.approvedTools ?? [], config.name));
     }
 
-    return { draftTools, approvedTools, sources, started, close: closeAll };
+    /**
+     * Ответ MCP приходит списком content-элементов; наши инструменты отдают текст, и он
+     * склеивается в одну строку. Неизвестный сервер — ошибка вызывающего, а не «пусто»:
+     * шаг, который думает, что записал память, а не записал, хуже упавшего шага.
+     */
+    const callTool: McpCallTool = async (serverName, toolName, args) => {
+      const server = byName.get(serverName);
+      if (!server) throw new Error(`MCP-сервер ${serverName} не поднят: вызвать ${toolName} нечем`);
+      const content = await server.callTool(toolName, args);
+      return (Array.isArray(content) ? content : [])
+        .map((item) => (typeof item.text === 'string' ? item.text : ''))
+        .filter(Boolean)
+        .join('\n');
+    };
+
+    return { draftTools, approvedTools, sources, started, callTool, close: closeAll };
   } catch (err) {
     await closeAll();
     throw err;

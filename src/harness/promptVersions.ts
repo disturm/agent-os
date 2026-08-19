@@ -39,3 +39,19 @@ export function loadPrompt(role: PromptRole, version: string): string {
 export function loadActivePrompt(role: PromptRole): string {
   return loadPrompt(role, ACTIVE_PROMPTS[role]);
 }
+
+/**
+ * Специализация модуля OS: `prompts/modules/<файл>` (`docs/specA.md`).
+ *
+ * Версий у этих файлов нет намеренно: версионируется базовый промпт коуча, а специализация —
+ * приписка к нему, и её история читается по git. Чтение живёт здесь, потому что `prompts/`
+ * читает этот модуль и только он; склейка с базовым промптом — уже дело OS (`src/os/runOS.ts`).
+ */
+export function loadModulePrompt(file: string): string {
+  const path = join(process.cwd(), 'prompts', 'modules', file);
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch {
+    throw new Error(`Нет файла промпта модуля ${file} (искали в prompts/modules/)`);
+  }
+}

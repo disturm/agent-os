@@ -59,6 +59,12 @@ export type AgentResult = {
   retrievals?: RetrievalRecord[];
   promptVersions: PromptVersions;
   durationMs: number;
+  /**
+   * Модуль OS, под которым шёл прогон, и уверенность роутера (`docs/specA.md`).
+   * `general` — специализации не было. Ответы до OS полей не имеют — отсюда `?`.
+   */
+  module?: string;
+  intentConfidence?: number;
 };
 
 /** Имя инструмента поиска по базе знаний: по нему таймлайн отличает `[rag]` от `[local]`. */
@@ -79,6 +85,8 @@ export const TOOL_META: Record<string, string> = {
   read_profile: 'прочитал профиль',
   read_recent_logs: 'заглянул в дневник',
   list_recipes: 'посмотрел рецепты',
+  read_habits: 'посмотрел трекер привычек',
+  check_habit: 'отметил привычку выполненной',
   save_health_plan: 'сохранил план в data/output.md',
   geocoding: 'нашёл координаты города',
   weather_forecast: 'взял прогноз погоды',

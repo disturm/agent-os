@@ -48,6 +48,16 @@ export type TraceRetrieval = {
 export type RunTrace = {
   runId: string;
   task: string;
+  /**
+   * Модуль OS, под которым шёл прогон, и уверенность роутера (`docs/specA.md`).
+   *
+   * В трейсе они рядом с версиями промптов не случайно: это такая же конфигурация прогона.
+   * По ним видно, почему у двух похожих задач разошлись наборы инструментов, и заодно —
+   * ошибся ли роутер. `general` означает, что уверенности не хватило и специализации не было.
+   * В трейсах до `docs/specA.md` полей нет — отсюда `?`.
+   */
+  module?: string;
+  intentConfidence?: number;
   promptVersions: PromptVersions;
   model: string;
   rounds: TraceRound[];
@@ -69,6 +79,8 @@ export type TraceSource = {
   retrievals: TraceRetrieval[];
   promptVersions: PromptVersions;
   durationMs: number;
+  /** Маршрутизация OS. Нет её — прогон шёл мимо роутера, и полей в трейсе не будет. */
+  routing?: { module: string; intentConfidence: number };
 };
 
 /** Начало плана. Обрезали — ставим многоточие, чтобы усечение было видно глазом. */
@@ -98,6 +110,7 @@ export function saveTrace(task: string, model: string, source: TraceSource): str
     const trace: RunTrace = {
       runId,
       task,
+      ...(source.routing ? { module: source.routing.module, intentConfidence: source.routing.intentConfidence } : {}),
       promptVersions: source.promptVersions,
       model,
       rounds: source.rounds.map(({ round, plan, review }) => ({ round, planExcerpt: excerpt(plan), review })),

@@ -1,0 +1,10 @@
+{
+  "name": "module-training",
+  "task": "Составь мне тренировку на завтра в зале: какие упражнения, сколько подходов и повторов.",
+  "expect": {
+    "verdict": "approve",
+    "minScore": 6,
+    "module": "training",
+    "usedTool": "suggestWorkoutTemplate"
+  }
+}

@@ -116,6 +116,7 @@ async function main(): Promise<void> {
   }
 
   console.log('\nАгенту из этих наборов достаются не все инструменты: право на вызов раздаёт harness по конфигу.');
+  console.log('Пометка «→ коучу» — потолок, а не факт: модуль OS сужает набор ещё раз (src/os/modules/).');
 }
 
 process.exitCode = await main().then(

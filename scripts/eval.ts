@@ -12,15 +12,19 @@
  * на `needs_human_professional`. Предохранитель — не edge case, поэтому его состояние
  * проверяется наравне с остальным, а не «когда-нибудь руками».
  *
- * Прогон платный и не быстрый: пять кейсов — это пять полных циклов, порядка 30+ вызовов модели.
+ * По `docs/specA.md` кейсы гоняются через `runOS`, а не через `runHealthAgent`: проверять
+ * надо продукт целиком, вместе с маршрутизацией. Отсюда же `expect.module` и четыре модульных
+ * кейса — три на разные модули и один на то, что Safety Reviewer работает и внутри модуля.
+ *
+ * Прогон платный и не быстрый: десять кейсов — это десять полных циклов, 50+ вызовов модели.
  */
 
 import 'dotenv/config'; // первым: harness читает env при загрузке модуля
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { runHealthAgent } from '../src/harness/runHealthAgent';
 import { calledTool } from '../src/harness/toolCalls';
+import { runOS } from '../src/os/runOS';
 
 const CASES_DIR = join(process.cwd(), 'evals', 'cases');
 
@@ -43,6 +47,12 @@ const CaseSchema = z.object({
      * вердикт `approve` сам по себе такого не гарантирует (`usedTool: "searchKnowledge"`).
      */
     usedTool: z.string().min(1).optional(),
+    /**
+     * Модуль, который обязан выбрать роутер (`docs/specA.md`). Проверяется отдельно от
+     * вердикта: ошибка маршрутизации не меняет безопасность плана, но меняет набор
+     * инструментов, и заметить её надо здесь, а не по расхождению планов через месяц.
+     */
+    module: z.string().min(1).optional(),
   }),
 });
 type EvalCase = z.infer<typeof CaseSchema>;
@@ -76,23 +86,31 @@ async function runCase(testCase: EvalCase): Promise<CaseResult> {
     expect.verdict,
     expect.minScore === undefined ? '' : `score ≥ ${expect.minScore}`,
     expect.usedTool ? `+${expect.usedTool}` : '',
+    expect.module ? `→ ${expect.module}` : '',
   ]
     .filter(Boolean)
     .join(', ');
 
   try {
-    const { review, finalScore, toolCalls } = await runHealthAgent(testCase.task);
+    const { review, finalScore, toolCalls, module } = await runOS(testCase.task);
+    // В колонку «получено» уезжает и модуль: без него FAIL по маршрутизации выглядел бы
+    // как обычный провал вердикта, хотя ревьюер отработал штатно.
+    const got = expect.module ? `${review.verdict} / ${module}` : review.verdict;
+    const score = `${finalScore}/10`;
 
     if (review.verdict !== expect.verdict) {
-      return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: false, reason: `ожидался verdict ${expect.verdict}` };
+      return { name, expected, got, score, passed: false, reason: `ожидался verdict ${expect.verdict}` };
+    }
+    if (expect.module && module !== expect.module) {
+      return { name, expected, got, score, passed: false, reason: `роутер выбрал ${module}, а не ${expect.module}` };
     }
     if (expect.minScore !== undefined && finalScore < expect.minScore) {
-      return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: false, reason: `score ${finalScore} ниже порога ${expect.minScore}` };
+      return { name, expected, got, score, passed: false, reason: `score ${finalScore} ниже порога ${expect.minScore}` };
     }
     if (expect.usedTool && !calledTool(toolCalls, expect.usedTool)) {
-      return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: false, reason: `агент не вызвал ${expect.usedTool}` };
+      return { name, expected, got, score, passed: false, reason: `агент не вызвал ${expect.usedTool}` };
     }
-    return { name, expected, got: review.verdict, score: `${finalScore}/10`, passed: true };
+    return { name, expected, got, score, passed: true };
   } catch (err: unknown) {
     // Упавший прогон — это FAIL кейса, а не падение всего набора: остальные ещё имеет смысл прогнать
     return { name, expected, got: 'ошибка', score: '—', passed: false, reason: err instanceof Error ? err.message : String(err) };
@@ -124,7 +142,7 @@ function printTable(results: CaseResult[]): void {
 
 async function main(): Promise<number> {
   const cases = loadCases();
-  console.log(`Кейсов: ${cases.length}. Прогон последовательный, каждый — полный цикл коуч→ревьюер.\n`);
+  console.log(`Кейсов: ${cases.length}. Прогон последовательный, каждый — полный цикл роутер→коуч→ревьюер.\n`);
 
   const results: CaseResult[] = [];
   for (const [index, testCase] of cases.entries()) {
