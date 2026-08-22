@@ -1,9 +1,17 @@
 import { Agent, type Tool } from '@openai/agents';
+import { AGENT_MODEL, providerSettings } from '../harness/provider';
 import { createKnowledgeSearch, type OnRetrieval } from '../skills/knowledge';
 import { generateShoppingList } from '../skills/shopping';
 import { suggestWorkoutTemplate } from '../skills/workouts';
 
-const MODEL = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro';
+/**
+ * Модель и настройки шлюза приходят из `src/harness/provider.ts` — раньше имя модели
+ * читалось здесь из env напрямую, и таких мест было три (`docs/specB.md`).
+ *
+ * Коуч — единственный, кому положена запасная модель: план пишет он, и обрыв на нём стоит
+ * всего прогона, тогда как повторить дешёвый вызов роутера или ревьюера почти ничего не стоит.
+ */
+const COACH_SETTINGS = providerSettings({}, true);
 
 /**
  * Локальные инструменты черновых кругов: обычные `tool()` из `src/skills/`.
@@ -63,7 +71,8 @@ export function createCoach(
   const all = [...mcpTools, ...localDraftTools(onRetrieval)];
   return new Agent({
     name: 'Health Coach',
-    model: MODEL,
+    model: AGENT_MODEL,
+    modelSettings: COACH_SETTINGS,
     instructions,
     tools: allowedTools ? pickTools(all, allowedTools) : all,
   });
@@ -91,5 +100,5 @@ export function createCoach(
  * `save_health_plan`, harness это заметит и скажет в логе (см. `saveApprovedPlan`).
  */
 export function createPlanSaver(instructions: string, mcpTools: Tool[]) {
-  return new Agent({ name: 'Health Coach', model: MODEL, instructions, tools: mcpTools });
+  return new Agent({ name: 'Health Coach', model: AGENT_MODEL, modelSettings: COACH_SETTINGS, instructions, tools: mcpTools });
 }

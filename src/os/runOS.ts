@@ -17,7 +17,7 @@
  * Один агент, восемь конфигураций и девятая — её отсутствие (`general`).
  */
 
-import { loadActivePrompt, loadModulePrompt } from '../harness/promptVersions';
+import { loadModulePrompt, resolvePrompt } from '../harness/promptVersions';
 import { runHealthAgent, type AgentResult, type RunOptions } from '../harness/runHealthAgent';
 import { updateMemory } from './memory';
 import { classifyIntent } from './router';
@@ -37,13 +37,23 @@ export type OsRunOptions = Omit<RunOptions, 'coachInstructions' | 'draftTools' |
  * Промпт коуча для модуля: активная версия плюс специализация.
  *
  * Дописывание, а не замена: запреты (диагнозы, лекарства, дозировки), формат плана и правила
- * сохранения живут в `prompts/healthCoach.v6.md` в единственном экземпляре. Разложить их по
- * восьми файлам модулей значило бы получить восемь редакций одного предохранителя, которые
+ * сохранения живут в базовом промпте коуча в единственном экземпляре. Разложить их по восьми
+ * файлам модулей значило бы получить восемь редакций одного предохранителя, которые
  * разъедутся на первой же правке.
+ *
+ * Базовая часть с `docs/specB.md` берётся через `resolvePrompt` — то есть из Langfuse, если он
+ * включён. Иначе смена label меняла бы поведение только у `general`, а у восьми модулей нет:
+ * они бы продолжали дописываться к старому файлу. Приписки модулей остаются файлами
+ * намеренно (`docs/specA.md`): версий у них нет, история читается по git.
+ *
+ * Промпт коуча за прогон резолвится дважды — здесь и в `runHealthAgent` (ему нужны версия
+ * для трейса и базовый текст для шага фиксации). Второе обращение бесплатно: клиент Langfuse
+ * кэширует промпты, а без Langfuse это чтение файла.
  */
-function coachPromptFor(module: OsModule): string | undefined {
+async function coachPromptFor(module: OsModule): Promise<string | undefined> {
   if (!module.promptFile) return undefined; // general: активная версия как есть
-  return `${loadActivePrompt('coach')}\n\n${loadModulePrompt(module.promptFile)}`;
+  const base = await resolvePrompt('coach');
+  return `${base.text}\n\n${loadModulePrompt(module.promptFile)}`;
 }
 
 /**
@@ -53,15 +63,18 @@ function coachPromptFor(module: OsModule): string | undefined {
  * прогона: промпт и набор инструментов. Это один дешёвый вызов сверх обычного цикла.
  */
 export async function runOS(task: string, options: OsRunOptions = {}): Promise<OsResult> {
-  const { module, confidence } = await classifyIntent(task);
+  const { module, confidence, observation } = await classifyIntent(task);
   console.log(`Модуль: ${module.name} (confidence ${confidence.toFixed(2)}), инструментов ${module.tools.length}`);
   options.onEvent?.({ type: 'module', module: module.name, confidence });
 
   const result = await runHealthAgent(task, {
     ...options,
-    coachInstructions: coachPromptFor(module),
+    coachInstructions: await coachPromptFor(module),
     draftTools: module.tools,
     routing: { module: module.name, intentConfidence: confidence },
+    // Классификация случилась до прогона, и наблюдать её harness не мог. Без этой записи
+    // сумма по дереву занижена на стоимость вызова роутера — дёшево, но неверно.
+    priorObservations: [observation],
     // Память обновляется только после approve — момент выбирает harness, содержимое записи — OS.
     afterApprove: ({ plan, callTool }) => updateMemory({ task, plan, module: module.name, callTool }),
   });

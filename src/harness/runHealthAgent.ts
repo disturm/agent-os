@@ -16,14 +16,17 @@
  * (`docs/spec7.md`); harness распоряжается не составом наборов, а моментом их выдачи.
  */
 
+import { randomUUID } from 'node:crypto';
 import { run } from '@openai/agents';
 import { createCoach, createPlanSaver } from '../agents/healthCoach';
 import { createReviewer } from '../agents/safetyReviewer';
+import { isLangfuseEnabled } from '../langfuse/client';
 import { startConfiguredServers, type McpCallTool, type McpConnections } from '../mcp/mcpClients';
 import { assertRagConfigured } from '../rag/retriever';
 import type { RetrievalRecord } from '../skills/knowledge';
-import { ACTIVE_PROMPTS, loadActivePrompt, type PromptVersions } from './promptVersions';
-import { MODEL } from './provider';
+import { createObservationLog, usageOf, type Observation, type UsageSource } from './observations';
+import { resolvePrompt, type PromptVersions } from './promptVersions';
+import { MODEL, REVIEWER_MODEL } from './provider';
 import { createRoundHistory, type RoundState } from './rounds';
 import { IGNORE_EVENTS, type OnEvent } from './runEvents';
 import { finalRound, finalScore, improved } from './score';
@@ -57,8 +60,18 @@ export type AgentResult = {
    * не только что агент искал, но и что нашёл.
    */
   retrievals: RetrievalRecord[];
-  /** Версии промптов, на которых сделан этот прогон. */
+  /** Версии промптов, на которых сделан этот прогон. `langfuse:7` — платформа, `v6` — файл. */
   promptVersions: PromptVersions;
+  /**
+   * Сколько раз ревьюера пришлось переспрашивать из-за невалидного JSON, за весь прогон
+   * (`docs/specB.md`). На нативном `response_format` ожидается 0.
+   */
+  reviewRetries: number;
+  /**
+   * Идентификатор прогона в Langfuse. `undefined` — платформа выключена.
+   * По нему evals привязывают свои оценки к дереву спанов (см. `src/langfuse/scores.ts`).
+   */
+  traceId?: string;
   durationMs: number;
 };
 
@@ -107,6 +120,16 @@ export type RunOptions = {
    */
   routing?: { module: string; intentConfidence: number };
   /**
+   * Шаги, случившиеся **до** прогона и потому harness не наблюдавшиеся, — сейчас это
+   * единственный вызов роутера OS (`docs/specB.md`).
+   *
+   * Нужны, чтобы итог по стоимости был честным: классификация тоже платная, и без неё
+   * сумма по дереву занижена. Собирать их harness не может — они произошли раньше, чем он
+   * получил управление, — поэтому приходят готовыми, ровно как `coachInstructions`.
+   * Порядок сохраняется: они идут первыми, и по ним же считается начало трейса.
+   */
+  priorObservations?: readonly Observation[];
+  /**
    * Шаг после `approve` и сохранения плана (`docs/specA.md`): обновление памяти.
    *
    * Момент принадлежит harness — серверы ещё подняты, план уже зафиксирован, — а что именно
@@ -140,6 +163,7 @@ export async function runHealthAgent(
     coachInstructions,
     draftTools,
     routing,
+    priorObservations,
     afterApprove,
   }: RunOptions = {},
 ): Promise<AgentResult> {
@@ -165,6 +189,7 @@ export async function runHealthAgent(
       coachInstructions,
       draftTools,
       routing,
+      priorObservations,
       afterApprove,
     });
   } finally {
@@ -180,7 +205,7 @@ type LoopContext = {
   startedAt: number;
   mcp: McpConnections;
   emit: OnEvent;
-} & Pick<RunOptions, 'coachInstructions' | 'draftTools' | 'routing' | 'afterApprove'>;
+} & Pick<RunOptions, 'coachInstructions' | 'draftTools' | 'routing' | 'priorObservations' | 'afterApprove'>;
 
 async function reviewLoop({
   task,
@@ -192,6 +217,7 @@ async function reviewLoop({
   coachInstructions,
   draftTools,
   routing,
+  priorObservations,
   afterApprove,
 }: LoopContext): Promise<AgentResult> {
   const history = createRoundHistory();
@@ -201,7 +227,21 @@ async function reviewLoop({
    * дело оркестратора, ровно как с `toolCalls`. Инструмент только зовёт колбэк.
    */
   const retrievals: RetrievalRecord[] = [];
-  const promptVersions: PromptVersions = { ...ACTIVE_PROMPTS };
+  /**
+   * След прогона по шагам — для дерева спанов в Langfuse (`docs/specB.md`).
+   *
+   * Отдельный канал, третий после `toolCalls` (итоговый список) и `onEvent` (живой таймлайн).
+   * Слить их «ради единообразия» нельзя: у списка нет времени, у событий нет прошлого,
+   * а дереву нужны обе половины. Без Langfuse накопитель просто наполняется и не читается —
+   * порядок шагов и вызовы модели от него не зависят.
+   */
+  const observations = createObservationLog();
+  let reviewRetries = 0;
+
+  // Промпты берутся из Langfuse, если он включён, иначе из `prompts/*.md` (`docs/specB.md`).
+  // Версии уезжают в результат и трейс ровно как раньше — поменялся только их источник.
+  const [coachSource, reviewerSource] = await Promise.all([resolvePrompt('coach'), resolvePrompt('reviewer')]);
+  const promptVersions: PromptVersions = { coach: coachSource.version, reviewer: reviewerSource.version };
 
   // Агенты собираются на прогон: промпт приходит из файла активной версии,
   // читающие инструменты — со всех поднятых MCP-серверов одним списком.
@@ -210,20 +250,28 @@ async function reviewLoop({
   // с другой инструкцией и суженным набором, а не второй агент (`docs/specA.md`).
   // Шаг фиксации остаётся на базовом промпте: сохранение одинаково во всех модулях, а текст
   // модуля перечисляет черновые инструменты, которых на этом шаге у агента уже нет.
-  const basePrompt = loadActivePrompt('coach');
+  const basePrompt = coachSource.text;
   const coachPrompt = coachInstructions ?? basePrompt;
+  /**
+   * Раунд, к которому относятся текущие шаги: инструменты и поиск вызываются вложенно,
+   * изнутри круга, и узнать номер иначе неоткуда. `undefined` — шаг вне раундов (фиксация плана).
+   */
+  let currentRound: number | undefined = 1;
   const coach = createCoach(
     coachPrompt,
     mcp.draftTools,
     (record) => {
       retrievals.push(record);
       emit({ type: 'retrieval', ...record });
+      // Момент вызова колбэка — уже после поиска, поэтому длительности у этой записи нет:
+      // её меряет наблюдение самого инструмента, а здесь важно, что искали и что нашли.
+      observations.open('retrieval', 'retrieval', currentRound)({ input: record.query, output: record.headings });
       console.log(`  knowledge: «${record.query}» → ${record.headings.length} chunk(s)`);
       for (const heading of record.headings) console.log(`    · ${heading}`);
     },
     draftTools,
   );
-  const reviewer = createReviewer(loadActivePrompt('reviewer'));
+  const reviewer = createReviewer(reviewerSource.text);
 
   /**
    * Живой поток вызовов инструментов для наблюдателя.
@@ -236,23 +284,44 @@ async function reviewLoop({
    * Источник берётся из той же `mcp.sources`, что и у `toolCallNames`, иначе пометки
    * в живом таймлайне и в трейсе разошлись бы.
    */
+  /**
+   * Незакрытые наблюдения за инструментами, очередями по имени.
+   *
+   * Очередь, а не «последний вызов», по той же причине, что `pendingSearches` в таймлайне
+   * чата: модель зовёт `searchKnowledge` параллельно — два `tool_start` подряд и только потом
+   * два `tool_end`. На одной переменной первый вызов остался бы незакрытым навсегда.
+   * i-е завершение достаётся i-му вызову.
+   */
+  const openTools = new Map<string, ((end?: { output?: unknown }) => void)[]>();
+
   const watchTools = (agent: ReturnType<typeof createCoach>) => {
-    agent.on('agent_tool_start', (_context, tool) =>
-      emit({ type: 'tool_call', name: tool.name, source: mcp.sources.get(tool.name) ?? LOCAL_SOURCE }),
-    );
-    agent.on('agent_tool_end', (_context, tool) => emit({ type: 'tool_result', name: tool.name }));
+    agent.on('agent_tool_start', (_context, tool) => {
+      const source = mcp.sources.get(tool.name) ?? LOCAL_SOURCE;
+      emit({ type: 'tool_call', name: tool.name, source });
+      const queue = openTools.get(tool.name) ?? [];
+      queue.push(observations.open(tool.name, 'tool', currentRound));
+      openTools.set(tool.name, queue);
+    });
+    agent.on('agent_tool_end', (_context, tool, result) => {
+      emit({ type: 'tool_result', name: tool.name });
+      openTools.get(tool.name)?.shift()?.({ output: result });
+    });
   };
   watchTools(coach);
 
   /** Прогон коуча: заодно пополняет список вызванных инструментов, чтобы это не забывалось на местах. */
   const askCoach = async (input: string, round: number): Promise<string> => {
     emit({ type: 'coach_start', round });
+    currentRound = round;
+    const close = observations.open('coach', 'generation', round);
     const result = await run(coach, input);
+    const plan = result.finalOutput ?? '';
+    close({ input, output: plan, model: MODEL, usage: usageOf(result) });
     const tools = toolCallNames(result.newItems, mcp.sources);
     toolCalls.push(...tools);
     if (tools.length) console.log(`  tools: ${tools.join(', ')}`);
     emit({ type: 'coach_end', round });
-    return result.finalOutput ?? '';
+    return plan;
   };
 
   /**
@@ -288,16 +357,24 @@ async function reviewLoop({
       `=== ПЛАН ===\n${plan}`,
     ].join('\n');
     emit({ type: 'saving' });
+    // Шаг фиксации идёт вне раундов: он один на прогон и относится к итогу, а не к кругу.
+    currentRound = undefined;
+    const close = observations.open('save-plan', 'generation');
     try {
       const saver = createPlanSaver(basePrompt, mcp.approvedTools);
       watchTools(saver);
       const result = await run(saver, input);
+      close({ input, output: result.finalOutput ?? '', model: MODEL, usage: usageOf(result) });
       const tools = toolCallNames(result.newItems, mcp.sources);
       toolCalls.push(...tools);
       if (calledTool(tools, 'save_health_plan')) console.log(`\nПлан сохранён в data/output.md. Score: ${review.score}/10`);
       else console.warn('\n! агент не вызвал save_health_plan — data/output.md не обновлён');
     } catch (err: unknown) {
-      console.warn(`\n! сохранить план не вышло: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      // Закрываем наблюдение и здесь: шаг, оборвавшийся на исключении, обязан попасть
+      // в дерево — именно такой и интересно потом рассматривать.
+      close({ output: `ошибка: ${message}` });
+      console.warn(`\n! сохранить план не вышло: ${message}`);
     }
   };
 
@@ -349,12 +426,23 @@ async function reviewLoop({
       toolCalls,
       retrievals,
       promptVersions,
+      reviewRetries,
+      // Идентификатор заводится только когда есть куда его отправить: пустое поле в результате
+      // честнее выдуманного id, по которому в платформе ничего не найдётся.
+      ...(isLangfuseEnabled() ? { traceId: randomUUID() } : {}),
       durationMs: Math.round(performance.now() - startedAt),
     };
     console.log(
-      `Итог: раунд ${outcome.round} из ${rounds.length}, verdict=${outcome.review.verdict}, score=${result.finalScore}/10, инструментов вызвано ${toolCalls.length} (из них поиск по базе знаний ${retrievals.length}), промпты coach ${promptVersions.coach} / reviewer ${promptVersions.reviewer}, ${result.durationMs} мс`,
+      `Итог: раунд ${outcome.round} из ${rounds.length}, verdict=${outcome.review.verdict}, score=${result.finalScore}/10, инструментов вызвано ${toolCalls.length} (из них поиск по базе знаний ${retrievals.length}), промпты coach ${promptVersions.coach} / reviewer ${promptVersions.reviewer} (источник: ${coachSource.source}), JSON-ретраев ревьюера ${reviewRetries}, ${result.durationMs} мс`,
     );
-    saveTrace(task, MODEL, { ...result, routing });
+    await saveTrace(task, MODEL, {
+      ...result,
+      routing,
+      langfuseTraceId: result.traceId,
+      // Шаги до прогона идут первыми: по первому наблюдению считается начало трейса,
+      // а началом был вызов роутера, а не первое обращение коуча.
+      observations: [...(priorObservations ?? []), ...observations.all()],
+    });
     return result;
   };
 
@@ -367,7 +455,24 @@ async function reviewLoop({
     // и проверять он обязан текст, который уедет пользователю, а не состояние диска.
     const prompt = `=== ЗАДАЧА ===\n${task}\n\n=== ПЛАН НА ПРОВЕРКУ ===\n${plan}`;
     emit({ type: 'review_start', round });
-    const review = await validateReview(async (retryHint) => (await run(reviewer, prompt + retryHint)).finalOutput ?? '');
+    currentRound = round;
+    const closeReview = observations.open('reviewer', 'generation', round);
+    // Расход копится по попыткам: ретрай ревьюера — это ещё один оплаченный вызов,
+    // и прятать его из наблюдения нельзя, иначе стоимость прогона окажется занижена.
+    const attempts: UsageSource[] = [];
+    const { review, retries } = await validateReview(async (retryHint) => {
+      const result = await run(reviewer, prompt + retryHint);
+      attempts.push(result);
+      return result.finalOutput ?? '';
+    });
+    reviewRetries += retries;
+    closeReview({
+      input: prompt,
+      output: review,
+      model: REVIEWER_MODEL,
+      usage: usageOf(...attempts),
+      metadata: { retries },
+    });
     history.record(plan, review);
     emit({ type: 'review_done', round, review });
 

@@ -14,16 +14,13 @@
 
 import { Agent, run } from '@openai/agents';
 import { z } from 'zod';
-// Импорт ради побочного эффекта: провайдер настраивается на загрузке этого модуля.
-// Без него SDK уходит в OpenAI с пустым ключом — см. `src/harness/provider.ts`.
-import '../harness/provider';
+// Отсюда приходит и модель, и настройка провайдера: импорт этого модуля — единственный
+// способ её выполнить. Без него SDK уходит в OpenAI с пустым ключом (`src/harness/provider.ts`).
+// До `docs/specB.md` имя модели читалось здесь из env, а провайдер держался импортом
+// ради побочного эффекта — то есть дисциплиной; теперь зависимость обязательна по типам.
+import { createObservationLog, usageOf, type Observation } from '../harness/observations';
+import { providerSettings, ROUTER_MODEL } from '../harness/provider';
 import { GENERAL, MODULES, findModule, type OsModule } from './modules';
-
-/**
- * Модель классификации. Отдельная от `DEEPSEEK_MODEL` и по умолчанию дешёвая: задача —
- * выбрать одно слово из девяти, рассуждать здесь не над чем.
- */
-const ROUTER_MODEL = process.env.DEEPSEEK_ROUTER_MODEL ?? 'deepseek-v4-flash';
 
 /**
  * Порог уверенности. Ниже — `general`: специализация сужает набор инструментов, и делать
@@ -37,6 +34,14 @@ export type Intent = {
   module: OsModule;
   /** Уверенность роутера, 0…1. У `general` по недостатку уверенности — та, что вернула модель. */
   confidence: number;
+  /**
+   * Наблюдение за этим вызовом — для дерева спанов (`docs/specB.md`).
+   *
+   * Строит его роутер, а не вызывающий, потому что только здесь известны модель, вход
+   * и сырой ответ. Классификация платная, и без этой записи итог по стоимости прогона
+   * занижен: harness наблюдать её не может — она случается до того, как он получит управление.
+   */
+  observation: Observation;
 };
 
 const IntentSchema = z.object({
@@ -104,20 +109,42 @@ function parseIntent(text: string): z.infer<typeof IntentSchema> | null {
  * а не повод платить второй раз за выбор, который и так есть чем заменить.
  */
 export async function classifyIntent(task: string): Promise<Intent> {
-  const router = new Agent({ name: 'Intent Router', model: ROUTER_MODEL, instructions: INSTRUCTIONS, tools: [] });
+  const router = new Agent({
+    name: 'Intent Router',
+    model: ROUTER_MODEL,
+    modelSettings: providerSettings(),
+    instructions: INSTRUCTIONS,
+    tools: [],
+  });
+
+  // Накопитель заводится ради одной записи, но границы шага он засекает сам — повторять
+  // эту арифметику на месте значило бы завести второй способ считать длительность.
+  const log = createObservationLog();
+  const close = log.open('router', 'generation');
   const result = await run(router, `=== ЗАДАЧА ===\n${task}`);
-  const parsed = parseIntent(result.finalOutput ?? '');
+  const answer = result.finalOutput ?? '';
+  const parsed = parseIntent(answer);
+
+  // Имя, которого нет в каталоге, findModule сводит к general: придуманный роутером модуль
+  // и модуль, в котором он не уверен, — для прогона одно и то же.
+  const module = !parsed ? GENERAL : parsed.confidence < CONFIDENCE_THRESHOLD ? GENERAL : findModule(parsed.module);
+  const confidence = parsed?.confidence ?? 0;
+
+  close({
+    input: task,
+    // Сырой ответ, а не разобранный: наблюдение должно показывать, что сказала модель,
+    // иначе разбираться в промахах классификации будет не по чему.
+    output: answer,
+    model: ROUTER_MODEL,
+    usage: usageOf(result),
+    metadata: { module: module.name, confidence, parsed: parsed !== null },
+  });
 
   if (!parsed) {
     // Текст ответа в предупреждение: «невалидный JSON» без него ничего не объясняет,
     // а починить промпт классификации можно только увидев, что модель написала вместо него.
-    const shown = (result.finalOutput ?? '').replace(/\s+/g, ' ').slice(0, 200);
-    console.warn(`  ! роутер вернул невалидный ответ — модуль general. Ответ: «${shown}»`);
-    return { module: GENERAL, confidence: 0 };
+    console.warn(`  ! роутер вернул невалидный ответ — модуль general. Ответ: «${answer.replace(/\s+/g, ' ').slice(0, 200)}»`);
   }
 
-  // Имя, которого нет в каталоге, findModule сводит к general: придуманный роутером модуль
-  // и модуль, в котором он не уверен, — для прогона одно и то же.
-  const module = parsed.confidence < CONFIDENCE_THRESHOLD ? GENERAL : findModule(parsed.module);
-  return { module, confidence: parsed.confidence };
+  return { module, confidence, observation: log.all()[0] };
 }

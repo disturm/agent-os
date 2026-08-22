@@ -58,6 +58,13 @@ export type AgentResult = {
    */
   retrievals?: RetrievalRecord[];
   promptVersions: PromptVersions;
+  /**
+   * Сколько раз ревьюера переспрашивали из-за невалидного JSON (`docs/specB.md`).
+   * На нативном `response_format` ожидается 0. Ответы до specB поля не имеют — отсюда `?`.
+   */
+  reviewRetries?: number;
+  /** Прогон в Langfuse. Пусто — платформа выключена, и разбор идёт по `runs/*.json`. */
+  traceId?: string;
   durationMs: number;
   /**
    * Модуль OS, под которым шёл прогон, и уверенность роутера (`docs/specA.md`).

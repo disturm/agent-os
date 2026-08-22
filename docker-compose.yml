@@ -1,0 +1,125 @@
+# Langfuse self-host для локальной разработки (docs/specB.md).
+#
+#   docker compose up -d          — поднять
+#   docker compose down           — погасить, данные остаются в томах
+#   docker compose down -v        — погасить и стереть всё
+#
+# Дальше: открыть http://localhost:3001, завести проект, скопировать пару ключей
+# в .env (LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY) и добавить LANGFUSE_BASE_URL=http://localhost:3001.
+#
+# ВАЖНО: web слушает 3001, а не 3000, — 3000 занят `next dev`. Внутри контейнера порт
+# остаётся 3000, наружу проброшен 3001; NEXTAUTH_URL обязан совпадать с внешним адресом,
+# иначе логин уходит в редирект-петлю.
+#
+# Cloud вместо self-host: не поднимать ничего, а поставить в .env
+# LANGFUSE_BASE_URL=https://cloud.langfuse.com и ключи оттуда. Код разницы не замечает —
+# см. src/langfuse/client.ts.
+#
+# Это учебный стенд, а не production-развёртывание: пароли ниже стоят прямо в файле,
+# TLS нет, данные лежат в локальных томах.
+
+services:
+  langfuse-web:
+    image: langfuse/langfuse:3
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "3001:3000"
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      SALT: local-dev-salt-change-me
+      # 256 бит в hex. Сгенерировать своё: openssl rand -hex 32
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      NEXTAUTH_SECRET: local-dev-secret-change-me
+      NEXTAUTH_URL: http://localhost:3001
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: redis
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+
+  # Приём и обработка событий. Веб-морда без него покажет пустые трейсы:
+  # ingestion складывает события в очередь, а разбирает их worker.
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment: *langfuse-env
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - langfuse-postgres:/var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: default
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+
+  minio:
+    image: minio/minio
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    # Каталог бакета создаётся до старта сервера: сам minio его не заводит,
+    # а ingestion падает на первом же событии, если бакета langfuse нет.
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - langfuse-minio:/data
+
+  redis:
+    image: redis:7
+    command: --requirepass redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  langfuse-postgres:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio:

@@ -11,10 +11,12 @@
     "ingest": "tsx scripts/ingest.ts",
     "replay": "tsx scripts/replay.ts",
     "eval": "tsx scripts/eval.ts",
-    "mcp:inspect": "tsx scripts/mcpInspect.ts"
+    "mcp:inspect": "tsx scripts/mcpInspect.ts",
+    "prompts:push": "tsx scripts/promptsPush.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.71",
+    "@langfuse/client": "^5.10.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/agents": "^0.16.0",
     "ai": "^7.0.68",

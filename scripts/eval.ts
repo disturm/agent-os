@@ -24,6 +24,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { calledTool } from '../src/harness/toolCalls';
+import { recordEvalOutcome } from '../src/langfuse/scores';
 import { runOS } from '../src/os/runOS';
 
 const CASES_DIR = join(process.cwd(), 'evals', 'cases');
@@ -92,29 +93,38 @@ async function runCase(testCase: EvalCase): Promise<CaseResult> {
     .join(', ');
 
   try {
-    const { review, finalScore, toolCalls, module } = await runOS(testCase.task);
+    const { review, finalScore, toolCalls, module, traceId } = await runOS(testCase.task);
     // В колонку «получено» уезжает и модуль: без него FAIL по маршрутизации выглядел бы
     // как обычный провал вердикта, хотя ревьюер отработал штатно.
     const got = expect.module ? `${review.verdict} / ${module}` : review.verdict;
     const score = `${finalScore}/10`;
+    const reason = failureReason(testCase, { verdict: review.verdict, finalScore, toolCalls, module });
 
-    if (review.verdict !== expect.verdict) {
-      return { name, expected, got, score, passed: false, reason: `ожидался verdict ${expect.verdict}` };
-    }
-    if (expect.module && module !== expect.module) {
-      return { name, expected, got, score, passed: false, reason: `роутер выбрал ${module}, а не ${expect.module}` };
-    }
-    if (expect.minScore !== undefined && finalScore < expect.minScore) {
-      return { name, expected, got, score, passed: false, reason: `score ${finalScore} ниже порога ${expect.minScore}` };
-    }
-    if (expect.usedTool && !calledTool(toolCalls, expect.usedTool)) {
-      return { name, expected, got, score, passed: false, reason: `агент не вызвал ${expect.usedTool}` };
-    }
-    return { name, expected, got, score, passed: true };
+    // Оценки уезжают в Langfuse и привязываются к трейсу этого же прогона (`docs/specB.md`):
+    // FAIL открывается прямо в дерево спанов, а не ищется сопоставлением по времени.
+    // Langfuse выключен — шаг молча пропускается, таблица от этого не меняется.
+    await recordEvalOutcome(traceId, { name, passed: !reason, score: finalScore, reason });
+
+    return { name, expected, got, score, passed: !reason, reason };
   } catch (err: unknown) {
-    // Упавший прогон — это FAIL кейса, а не падение всего набора: остальные ещё имеет смысл прогнать
+    // Упавший прогон — это FAIL кейса, а не падение всего набора: остальные ещё имеет смысл
+    // прогнать. Score в Langfuse при этом не пишется — привязывать его не к чему, трейса нет.
     return { name, expected, got: 'ошибка', score: '—', passed: false, reason: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Первое нарушенное ожидание кейса или `undefined`, если всё сошлось. Порядок проверок значим. */
+function failureReason(
+  { expect }: EvalCase,
+  got: { verdict: string; finalScore: number; toolCalls: string[]; module: string },
+): string | undefined {
+  if (got.verdict !== expect.verdict) return `ожидался verdict ${expect.verdict}`;
+  if (expect.module && got.module !== expect.module) return `роутер выбрал ${got.module}, а не ${expect.module}`;
+  if (expect.minScore !== undefined && got.finalScore < expect.minScore) {
+    return `score ${got.finalScore} ниже порога ${expect.minScore}`;
+  }
+  if (expect.usedTool && !calledTool(got.toolCalls, expect.usedTool)) return `агент не вызвал ${expect.usedTool}`;
+  return undefined;
 }
 
 function printTable(results: CaseResult[]): void {
